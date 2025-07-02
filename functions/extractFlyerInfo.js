@@ -154,9 +154,6 @@ BEGIN.`
       { type: "text", text: context ? context : "Extract event information from this image." },
       { type: "image_url", image_url: { url: imageUrl, detail: "high" } }
     ];
-    logger.info('--- extractFlyerInfo: System Message ---', systemMessage);
-    logger.info('--- extractFlyerInfo: User Messages ---', userMessages);
-    logger.info('--- extractFlyerInfo: Calling OpenAI API ---');
     let rawMessage = null;
     let jsonString = null; // Declare jsonString here
     try {
@@ -166,13 +163,10 @@ BEGIN.`
         max_tokens: 1000,
       });
       rawMessage = response.choices[0].message.content;
-      logger.info('--- extractFlyerInfo: OpenAI API call successful ---');
-      logger.info('--- extractFlyerInfo: Raw message from OpenAI ---', rawMessage);
     } catch (openaiError) {
       logger.error('OpenAI API call failed', { error: openaiError.message, response: openaiError.response });
       return res.status(500).json({ success: false, error: 'Extraction failed', details: 'OpenAI API call failed.' });
     }
-    logger.info('--- extractFlyerInfo: Processing OpenAI response ---');
     
     // Remove Markdown code block if present
     if (rawMessage.startsWith('```')) {
@@ -180,17 +174,14 @@ BEGIN.`
     } else {
       jsonString = rawMessage.trim();
     }
-    logger.info('--- extractFlyerInfo: Processed JSON string ---', jsonString);
     let parsedData;
     try {
       parsedData = JSON.parse(jsonString);
-      logger.info('--- extractFlyerInfo: Successfully parsed JSON ---', parsedData);
     } catch (parseError) {
       logger.error('extractFlyerInfo error: JSON parsing failed', { error: parseError.message, rawJson: jsonString });
       return res.status(500).json({ success: false, error: 'Extraction failed', details: 'Failed to parse OpenAI response.' });
     }
 
-    logger.info('--- extractFlyerInfo: Sending final response ---');
     res.status(200).json({ success: true, data: parsedData });
   } catch (err) {
     logger.error('extractFlyerInfo error', { error: err, stack: err.stack });
