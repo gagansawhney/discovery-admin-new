@@ -1,0 +1,22 @@
+{
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ],
+      "predeploy": [
+        "npm --prefix \"$RESOURCE_DIR\" run lint"
+      ],
+      "secrets": ["OPENAI_API_KEY", "GOOGLE_MAPS_API_KEY"]
+    }
+  ],
+  "storage": {
+    "rules": "storage.rules"
+  }
+}
