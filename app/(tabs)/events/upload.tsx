@@ -279,6 +279,7 @@ export default function UploadScreen() {
       });
       
       console.log('☁️ Upload response status:', uploadResp.status, 'ok:', uploadResp.ok);
+      console.log('☁️ Full Upload response:', uploadResp);
       
       if (!uploadResp.ok) {
         const uploadErrorText = await uploadResp.text().catch(() => uploadResp.statusText);
@@ -297,6 +298,7 @@ export default function UploadScreen() {
       });
       
       console.log('🔍 Extract response status:', extractResp.status, 'ok:', extractResp.ok);
+      console.log('🔍 Full Extract response:', extractResp);
       
       if (!extractResp.ok) {
         const errText = await extractResp.text().catch(() => extractResp.statusText);

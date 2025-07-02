@@ -1,16 +1,13 @@
 const functions = require('firebase-functions');
 const { db, bucket, externalDb } = require('./firebase');
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const logger = require('firebase-functions/logger');
+
+
 
 const { checkVen } = require('./checkVen');
 const OpenAI = require('openai');
-const cors = require('cors')({
-  origin: true,
-  credentials: true
-});
-const logger = require('firebase-functions/logger');
 
-exports.extractFlyerInfo = functions.https.onRequest({ invoker: 'public', secrets: ["OPENAI_API_KEY"] }, async (req, res) => {
+exports.extractFlyerInfo = functions.https.onRequest({ invoker: 'public', secrets: ["OPENAI_API_KEY"], timeoutSeconds: 540 }, async (req, res) => {
   logger.info('--- extractFlyerInfo: Function started ---');
 
   // Set CORS headers
@@ -25,51 +22,51 @@ exports.extractFlyerInfo = functions.https.onRequest({ invoker: 'public', secret
     return;
   }
 
-  cors(req, res, async () => {
-    logger.info('--- extractFlyerInfo: Inside CORS middleware ---');
-    try {
-      // Check if OpenAI API key is available
-      if (!OPENAI_API_KEY) {
-        logger.error('extractFlyerInfo error: OpenAI API key not configured');
-        res.status(500).json({ error: 'OpenAI API key not configured. Please contact administrator.' });
-        return;
-      }
-      logger.info('--- extractFlyerInfo: OpenAI API key is present ---');
+  try {
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.trim() : undefined;
+    // Check if OpenAI API key is available
+    if (!OPENAI_API_KEY) {
+      logger.error('extractFlyerInfo error: OpenAI API key not configured');
+      res.status(500).json({ error: 'OpenAI API key not configured. Please contact administrator.' });
+      return;
+    }
+    logger.info('--- extractFlyerInfo: OpenAI API key is present ---');
 
-      const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-      logger.info('extractFlyerInfo called', { method: req.method, headers: req.headers, body: req.body });
-      if (req.method !== 'POST') {
-        res.status(405).send('Method Not Allowed');
-        return;
-      }
-      logger.info('--- extractFlyerInfo: Request method is POST ---');
+    const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+    logger.info('extractFlyerInfo called', { method: req.method, headers: req.headers, body: req.body });
+    if (req.method !== 'POST') {
+      res.status(405).send('Method Not Allowed');
+      return;
+    }
+    logger.info('--- extractFlyerInfo: Request method is POST ---');
 
-      const { path, context } = req.body;
-      if (!path) {
-        logger.error('extractFlyerInfo error: Missing storage path');
-        res.status(400).json({ error: 'Missing storage path' });
-        return;
-      }
-      logger.info('--- extractFlyerInfo: Storage path received ---', { path, context });
+    const { path, context } = req.body;
+    if (!path) {
+      logger.error('extractFlyerInfo error: Missing storage path');
+      res.status(400).json({ error: 'Missing storage path' });
+      return;
+    }
+    logger.info('--- extractFlyerInfo: Storage path received ---', { path, context });
 
-      // Use default storage bucket
-      const file = bucket.file(path);
-      logger.info('--- extractFlyerInfo: Attempting file download ---');
-      await file.download(); // Download to ensure file exists, but we don't need the buffer
-      logger.info('--- extractFlyerInfo: File downloaded ---');
+    // Use default storage bucket
+    const file = bucket.file(path);
+    logger.info('--- extractFlyerInfo: Attempting file download ---');
+    await file.download(); // Download to ensure file exists, but we don't need the buffer
+    logger.info('--- extractFlyerInfo: File downloaded ---');
 
-      const expiresAt = Date.now() + 60 * 60 * 1000;
-      const [imageUrl] = await file.getSignedUrl({
-        version: 'v4',
-        action: 'read',
-        expires: expiresAt,
-      });
-      logger.info('--- extractFlyerInfo: Signed URL generated ---', { imageUrl });
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    const [imageUrl] = await file.getSignedUrl({
+      version: 'v4',
+      action: 'read',
+      expires: expiresAt,
+    });
+    logger.info('--- extractFlyerInfo: Signed URL generated ---', { imageUrl });
 
-      // Build system and user messages for OpenAI
-      const systemMessage = {
-        role: "system",
-        content: `YOU ARE: an event-extraction assistant.  
+    // Build system and user messages for OpenAI
+    logger.info('--- extractFlyerInfo: Building system and user messages ---');
+    const systemMessage = {
+      role: "system",
+      content: `YOU ARE: an event-extraction assistant.  
 GOAL: return ONE JSON object that my database can ingest.
 
 ──────── MANDATORY FIELDS ────────
@@ -152,37 +149,51 @@ Omit keys you cannot fill; do not output null for missing optional keys
 (except where the schema above explicitly allows null).
 
 BEGIN.`
-      };
-      const userMessages = [
-        { type: "text", text: context ? context : "Extract event information from this image." },
-        { type: "image_url", image_url: { url: imageUrl, detail: "high" } }
-      ];
-      logger.info('--- extractFlyerInfo: Calling OpenAI API ---');
-      let rawMessage = null;
-      let jsonString = null; // Declare jsonString here
-      try {
-        const response = await openai.chat.completions.create({
-          model: "gpt-4o",
-          messages: [systemMessage, { role: "user", content: userMessages }],
-          max_tokens: 1000,
-        });
-        rawMessage = response.choices[0].message.content;
-        logger.info('--- extractFlyerInfo: OpenAI API call successful ---');
-      } catch (openaiError) {
-        logger.error('OpenAI API call failed', { error: openaiError.message, response: openaiError.response });
-        return res.status(500).json({ success: false, error: 'Extraction failed', details: 'OpenAI API call failed.' });
-      }
-      logger.info('--- extractFlyerInfo: Processing OpenAI response ---');
-      
-      // Remove Markdown code block if present
-      if (rawMessage.startsWith('```')) {
-        jsonString = rawMessage.replace(/^```[a-zA-Z]*\n?/, '').replace(/```$/, '').trim();
-      } else {
-        jsonString = rawMessage.trim();
-      }
-    } catch (err) {
-      logger.error('extractFlyerInfo error', { error: err, stack: err.stack });
-      res.status(500).json({ error: 'Extraction failed', details: err.message });
+    };
+    const userMessages = [
+      { type: "text", text: context ? context : "Extract event information from this image." },
+      { type: "image_url", image_url: { url: imageUrl, detail: "high" } }
+    ];
+    logger.info('--- extractFlyerInfo: System Message ---', systemMessage);
+    logger.info('--- extractFlyerInfo: User Messages ---', userMessages);
+    logger.info('--- extractFlyerInfo: Calling OpenAI API ---');
+    let rawMessage = null;
+    let jsonString = null; // Declare jsonString here
+    try {
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: [systemMessage, { role: "user", content: userMessages }],
+        max_tokens: 1000,
+      });
+      rawMessage = response.choices[0].message.content;
+      logger.info('--- extractFlyerInfo: OpenAI API call successful ---');
+      logger.info('--- extractFlyerInfo: Raw message from OpenAI ---', rawMessage);
+    } catch (openaiError) {
+      logger.error('OpenAI API call failed', { error: openaiError.message, response: openaiError.response });
+      return res.status(500).json({ success: false, error: 'Extraction failed', details: 'OpenAI API call failed.' });
     }
-  });
+    logger.info('--- extractFlyerInfo: Processing OpenAI response ---');
+    
+    // Remove Markdown code block if present
+    if (rawMessage.startsWith('```')) {
+      jsonString = rawMessage.replace(/^```[a-zA-Z]*\n?/, '').replace(/```$/, '').trim();
+    } else {
+      jsonString = rawMessage.trim();
+    }
+    logger.info('--- extractFlyerInfo: Processed JSON string ---', jsonString);
+    let parsedData;
+    try {
+      parsedData = JSON.parse(jsonString);
+      logger.info('--- extractFlyerInfo: Successfully parsed JSON ---', parsedData);
+    } catch (parseError) {
+      logger.error('extractFlyerInfo error: JSON parsing failed', { error: parseError.message, rawJson: jsonString });
+      return res.status(500).json({ success: false, error: 'Extraction failed', details: 'Failed to parse OpenAI response.' });
+    }
+
+    logger.info('--- extractFlyerInfo: Sending final response ---');
+    res.status(200).json({ success: true, data: parsedData });
+  } catch (err) {
+    logger.error('extractFlyerInfo error', { error: err, stack: err.stack });
+    res.status(500).json({ error: 'Extraction failed', details: err.message });
+  }
 });
