@@ -12,6 +12,7 @@ import { Alert, Button, Platform, ScrollView, StyleSheet, TextInput, TouchableOp
 const GENERATE_URL  = 'https://generateuploadurl-f3zapaqx6a-uc.a.run.app';
 const EXTRACT_URL   = 'https://extractflyerinfo-f3zapaqx6a-uc.a.run.app';
 const LOG_ERROR_URL = 'https://logerror-f3zapaqx6a-uc.a.run.app';
+const SAVE_EVENT_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/saveEvent';
 
 interface QueuedItem {
   id: string;
@@ -279,12 +280,11 @@ export default function UploadScreen() {
       });
       
       console.log('☁️ Upload response status:', uploadResp.status, 'ok:', uploadResp.ok);
-      console.log('☁️ Full Upload response:', uploadResp);
       
       if (!uploadResp.ok) {
         const uploadErrorText = await uploadResp.text().catch(() => uploadResp.statusText);
         console.error('❌ Upload failed:', uploadResp.status, uploadErrorText);
-        throw new Error(`Upload failed: ${uploadResp.statusText}`);
+        throw new Error(`Upload failed: ${uploadErrorText}`);
       }
       
       console.log('✅ Upload successful!');
@@ -298,7 +298,6 @@ export default function UploadScreen() {
       });
       
       console.log('🔍 Extract response status:', extractResp.status, 'ok:', extractResp.ok);
-      console.log('🔍 Full Extract response:', extractResp);
       
       if (!extractResp.ok) {
         const errText = await extractResp.text().catch(() => extractResp.statusText);
@@ -310,6 +309,22 @@ export default function UploadScreen() {
       const data = await extractResp.json();
       console.log('📄 Extract response data:', data);
       
+      // Save extracted data to database
+      console.log('💾 Attempting to save extracted data to database...');
+      const saveResp = await fetch(SAVE_EVENT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data.data), // Assuming data.data contains the event object
+      });
+
+      console.log('💾 Save to DB response status:', saveResp.status, 'ok:', saveResp.ok);
+      if (!saveResp.ok) {
+        const saveErrorText = await saveResp.text().catch(() => saveResp.statusText);
+        console.error('❌ Failed to save to database:', saveResp.status, saveErrorText);
+        throw new Error(`Failed to save event to database: ${saveErrorText}`);
+      }
+      console.log('✅ Data saved to database successfully!');
+
       // Check for venue validation errors
       if (data.venueValidation && !data.venueValidation.isValid) {
         console.log('❌ Venue validation failed:', data.venueValidation);
@@ -741,11 +756,13 @@ export default function UploadScreen() {
         };
         
         // Save to Firestore
+        console.log('Attempting to save event to Firestore:', eventData);
         const response = await fetch('https://us-central1-discovery-admin-f87ce.cloudfunctions.net/saveEvent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(eventData)
         });
+        console.log('Response from saveEvent function:', response.status, response.ok);
         
         if (response.ok) {
           createdEvents.push(eventData);

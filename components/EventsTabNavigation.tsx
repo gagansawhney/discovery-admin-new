@@ -5,11 +5,11 @@ import React from 'react';
 import { StyleSheet, TouchableOpacity } from 'react-native';
 
 interface EventsTabNavigationProps {
-  activeTab: 'upload' | 'list';
+  activeTab: 'upload' | 'list' | 'scraper';
 }
 
 export function EventsTabNavigation({ activeTab }: EventsTabNavigationProps) {
-  const navigateToTab = (tab: 'upload' | 'list') => {
+  const navigateToTab = (tab: 'upload' | 'list' | 'scraper') => {
     if (tab !== activeTab) {
       router.push(`/(tabs)/events/${tab}` as any);
     }
@@ -32,6 +32,15 @@ export function EventsTabNavigation({ activeTab }: EventsTabNavigationProps) {
       >
         <ThemedText style={[styles.tabText, activeTab === 'list' && styles.activeTabText]}>
           📋 Event List
+        </ThemedText>
+      </TouchableOpacity>
+
+      <TouchableOpacity 
+        style={[styles.tab, activeTab === 'scraper' && styles.activeTab]}
+        onPress={() => navigateToTab('scraper')}
+      >
+        <ThemedText style={[styles.tabText, activeTab === 'scraper' && styles.activeTabText]}>
+          🤖 Scraper
         </ThemedText>
       </TouchableOpacity>
     </ThemedView>

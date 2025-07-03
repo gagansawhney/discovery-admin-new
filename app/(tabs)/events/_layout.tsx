@@ -11,6 +11,7 @@ export default function EventsTabLayout() {
       <Stack.Screen name="upload" />
       
       <Stack.Screen name="list" />
+      <Stack.Screen name="scraper" />
     </Stack>
   );
 } 

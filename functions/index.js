@@ -1,6 +1,7 @@
 const { generateUploadUrl } = require('./generateUploadUrl');
 const { extractFlyerInfo } = require('./extractFlyerInfo');
 const { logError } = require('./logError');
+const { startInstagramScraper } = require('./startInstagramScraper');
 
 
 
@@ -15,12 +16,17 @@ const { deleteEvent } = require('./deleteEvent');
 const { saveEvent } = require('./saveEvent');
 
 const { checkVen } = require('./checkVen');
+const { getApifyRunsList } = require('./getApifyRunsList');
 
+const { addUsername } = require('./addUsername');
+const { deleteUsername } = require('./deleteUsername');
+const { listUsernames } = require('./listUsernames');
 
 module.exports = {
   generateUploadUrl,
   extractFlyerInfo,
   logError,
+  startInstagramScraper,
   
   manageVenues,
   geocodeAddress,
@@ -32,4 +38,8 @@ module.exports = {
   
   checkVen,
   
+  addUsername,
+  deleteUsername,
+  listUsernames,
+  getApifyRunsList,
 };
