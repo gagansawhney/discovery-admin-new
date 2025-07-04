@@ -2,6 +2,7 @@ const functions = require('firebase-functions');
 const { Actor } = require('apify');
 const logger = require('firebase-functions/logger');
 const { externalDb } = require('./firebase'); // Import externalDb
+const { Buffer } = require('buffer');
 
 // Define the secret for the Apify API token
 const APIFY_API_TOKEN = process.env.APIFY_API_TOKEN;
@@ -45,51 +46,64 @@ exports.startInstagramScraper = functions.https.onRequest({ invoker: 'public', s
 
     logger.info('--- startInstagramScraper: Received request ---', { instagramUsernames, startDate });
 
-    // Initialize Apify SDK
-    await Actor.init();
-
+    // Prepare Apify input
     const input = {
       "username": instagramUsernames.split(',').map(u => u.trim()),
     };
-
     if (startDate) {
       input.onlyPostsNewerThan = startDate;
     }
 
-    logger.info('--- startInstagramScraper: Starting Apify actor ---', { input });
+    // Prepare webhook definition
+    const webhookUrl = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/apifyWebhookHandler';
+    const webhookPayload = '{ "runId": "{{runId}}", "datasetId": "{{defaultDatasetId}}", "status": "{{status}}", "error": "{{errorMessage}}" }';
+    const webhooks = [
+      {
+        eventTypes: ['ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED'],
+        requestUrl: webhookUrl,
+        payloadTemplate: webhookPayload,
+      }
+    ];
+    const webhooksParam = Buffer.from(JSON.stringify(webhooks)).toString('base64');
 
-    const actor = await Actor.call('apify/instagram-post-scraper', input, { token: APIFY_API_TOKEN });
+    logger.info('--- startInstagramScraper: Webhooks param (decoded) ---', { webhooks });
+    logger.info('--- startInstagramScraper: Webhooks param (base64) ---', { webhooksParam });
 
-    logger.info('--- startInstagramScraper: Apify actor started ---', { actorRunId: actor.id });
-
-    // Save run information to Firestore
-    const runDocRef = externalDb.collection('apifyRuns').doc(actor.id);
-    await runDocRef.set({
-      runId: actor.id,
-      datasetId: actor.defaultDatasetId,
-      status: 'initiated',
-      initiatedAt: new Date().toISOString(),
-      instagramUsernames: instagramUsernames,
-    });
-    logger.info('--- startInstagramScraper: Apify run info saved to Firestore ---', { runId: actor.id });
-
-    // --- LOGGING FOR USERNAMES COLLECTION ---
+    // Start Apify actor run using REST API with webhooks param
+    const apifyRunUrl = `https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs?token=${APIFY_API_TOKEN}&webhooks=${webhooksParam}`;
+    let runResult = null;
     try {
-      const usernamesSnapshot = await externalDb.collection('scraperUsernames').get();
-      logger.info('--- startInstagramScraper: scraperUsernames collection fetched ---', { count: usernamesSnapshot.size });
-      logger.info('--- startInstagramScraper: scraperUsernames IDs ---', { ids: usernamesSnapshot.docs.map(doc => doc.id) });
-      logger.info('--- startInstagramScraper: scraperUsernames data ---', { usernames: usernamesSnapshot.docs.map(doc => doc.data()) });
-    } catch (err) {
-      logger.error('--- startInstagramScraper: Error fetching scraperUsernames collection ---', { error: err.message });
+      logger.info('--- startInstagramScraper: Starting Apify run via REST API ---', { apifyRunUrl, input, webhooks });
+      const runResponse = await fetch(apifyRunUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      });
+      runResult = await runResponse.json();
+      logger.info('--- startInstagramScraper: Apify run REST API response ---', { runResult });
+      if (!runResult.data || !runResult.data.id) {
+        throw new Error('Apify run did not return a valid run ID');
+      }
+      // Save run info to Firestore
+      logger.info('--- startInstagramScraper: Saving run info to Firestore ---', { runId: runResult.data.id, datasetId: runResult.data.defaultDatasetId });
+      const runDocRef = externalDb.collection('apifyRuns').doc(runResult.data.id);
+      await runDocRef.set({
+        runId: runResult.data.id,
+        datasetId: runResult.data.defaultDatasetId,
+        status: 'initiated',
+        initiatedAt: new Date().toISOString(),
+        instagramUsernames: instagramUsernames,
+      });
+      // Respond immediately
+      logger.info('--- startInstagramScraper: Responding to client ---', { runId: runResult.data.id });
+      res.status(200).json({ success: true, message: 'Scrape requested. Webhook attached at run start.', runId: runResult.data.id, inputSent: { instagramUsernames, startDate }, webhookPayload, runResult });
+    } catch (error) {
+      logger.error('startInstagramScraper error', { error: error.message, stack: error.stack, fullError: error });
+      res.status(500).json({ success: false, error: 'Failed to start scraper', details: error.message });
     }
-
-    res.status(200).json({ success: true, message: 'Apify actor started', runId: actor.id, datasetId: actor.defaultDatasetId });
 
   } catch (error) {
     logger.error('startInstagramScraper error', { error: error.message, stack: error.stack, fullError: error });
     res.status(500).json({ success: false, error: 'Failed to start scraper', details: error.message });
-  } finally {
-    // Exit Apify SDK
-    await Actor.exit();
   }
 });

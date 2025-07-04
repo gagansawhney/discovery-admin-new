@@ -22,6 +22,11 @@ const { addUsername } = require('./addUsername');
 const { deleteUsername } = require('./deleteUsername');
 const { listUsernames } = require('./listUsernames');
 
+const { apifyWebhookHandler } = require('./apifyWebhookHandler');
+// const { pollApifyRuns, manualPollApifyRuns } = require('./pollApifyRuns');
+const { manualPollApifyRuns, deletePollingLog } = require('./pollApifyRuns');
+const { getApifyRunResults } = require('./getApifyRunResults');
+
 module.exports = {
   generateUploadUrl,
   extractFlyerInfo,
@@ -42,4 +47,9 @@ module.exports = {
   deleteUsername,
   listUsernames,
   getApifyRunsList,
+  apifyWebhookHandler,
+  // pollApifyRuns,
+  manualPollApifyRuns,
+  deletePollingLog,
+  getApifyRunResults,
 };
