@@ -25,7 +25,7 @@ const { listUsernames } = require('./listUsernames');
 const { apifyWebhookHandler } = require('./apifyWebhookHandler');
 // const { pollApifyRuns, manualPollApifyRuns } = require('./pollApifyRuns');
 const { manualPollApifyRuns, deletePollingLog } = require('./pollApifyRuns');
-const { getApifyRunResults } = require('./getApifyRunResults');
+const { getApifyRunResults, proxyInstagramImage } = require('./getApifyRunResults');
 
 module.exports = {
   generateUploadUrl,
@@ -52,4 +52,5 @@ module.exports = {
   manualPollApifyRuns,
   deletePollingLog,
   getApifyRunResults,
+  proxyInstagramImage,
 };

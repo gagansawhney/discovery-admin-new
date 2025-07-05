@@ -4,7 +4,7 @@ import { ThemedView } from '@/components/ThemedView';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Button, Modal, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Button, Image, Modal, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 
 const START_SCRAPER_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/startInstagramScraper';
 const GET_RUNS_LIST_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/getApifyRunsList';
@@ -48,6 +48,11 @@ export default function ScraperScreen() {
   const [isPollingLogsExpanded, setIsPollingLogsExpanded] = useState(false);
   const [scrapedData, setScrapedData] = useState<any[]>([]);
   const [isScrapedDataLoading, setIsScrapedDataLoading] = useState(false);
+  const [currentPostIndex, setCurrentPostIndex] = useState(0);
+  const [currentImageIndex, setCurrentImageIndex] = useState(0);
+  const [postDecisions, setPostDecisions] = useState<{[key: number]: 'accept' | 'reject' | null}>({});
+  const [imageLoadErrors, setImageLoadErrors] = useState<{[key: string]: boolean}>({});
+  const [imageLoadSuccess, setImageLoadSuccess] = useState<{[key: string]: boolean}>({});
 
   const fetchApifyRuns = useCallback(async () => {
     setIsLoadingRuns(true);
@@ -197,7 +202,7 @@ export default function ScraperScreen() {
       if (data.documents) {
         setPollingLogs(data.documents.map((doc: any) => ({
           id: doc.name.split('/').pop(),
-          ...Object.fromEntries(Object.entries(doc.fields || {}).map(([k, v]) => [k, v.stringValue || v.arrayValue?.values?.map((x:any) => x.stringValue || x.mapValue?.fields || x) || v.integerValue || v.doubleValue || v.booleanValue || v.timestampValue || null]))
+          ...Object.fromEntries(Object.entries(doc.fields || {}).map(([k, v]: [string, any]) => [k, v.stringValue || v.arrayValue?.values?.map((x:any) => x.stringValue || x.mapValue?.fields || x) || v.integerValue || v.doubleValue || v.booleanValue || v.timestampValue || null]))
         })));
       } else {
         setPollingLogs([]);
@@ -288,11 +293,82 @@ export default function ScraperScreen() {
   useEffect(() => {
     if (modalVisible && selectedRun && selectedRun.runId && selectedRun.datasetId) {
       fetchScrapedData(selectedRun.runId, selectedRun.datasetId);
+      // Reset navigation state when modal opens
+      setCurrentPostIndex(0);
+      setCurrentImageIndex(0);
+      setPostDecisions({});
     } else {
       setScrapedData([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modalVisible, selectedRun]);
+
+  // Helper functions for post navigation
+  const goToNextPost = () => {
+    if (currentPostIndex < scrapedData.length - 1) {
+      setCurrentPostIndex(currentPostIndex + 1);
+      setCurrentImageIndex(0);
+    }
+  };
+
+  const goToPreviousPost = () => {
+    if (currentPostIndex > 0) {
+      setCurrentPostIndex(currentPostIndex - 1);
+      setCurrentImageIndex(0);
+    }
+  };
+
+  const goToNextImage = () => {
+    const currentPost = scrapedData[currentPostIndex];
+    const images = getPostImages(currentPost);
+    if (currentImageIndex < images.length - 1) {
+      setCurrentImageIndex(currentImageIndex + 1);
+    }
+  };
+
+  const goToPreviousImage = () => {
+    if (currentImageIndex > 0) {
+      setCurrentImageIndex(currentImageIndex - 1);
+    }
+  };
+
+  const getPostImages = (post: any): string[] => {
+    const images: string[] = [];
+    if (post.displayUrl) images.push(post.displayUrl);
+    if (post.thumbnailUrl && !images.includes(post.thumbnailUrl)) images.push(post.thumbnailUrl);
+    if (post.images && Array.isArray(post.images)) {
+      post.images.forEach((img: any) => {
+        if (img.url && !images.includes(img.url)) images.push(img.url);
+      });
+    }
+    return images;
+  };
+
+  const handlePostDecision = (decision: 'accept' | 'reject') => {
+    setPostDecisions(prev => ({
+      ...prev,
+      [currentPostIndex]: decision
+    }));
+  };
+
+  const handleProcessPosts = () => {
+    const acceptedPosts = scrapedData.filter((_, index) => postDecisions[index] === 'accept');
+    const rejectedPosts = scrapedData.filter((_, index) => postDecisions[index] === 'reject');
+    const unprocessedPosts = scrapedData.filter((_, index) => !postDecisions[index]);
+    
+    Alert.alert(
+      'Process Posts',
+      `Accepted: ${acceptedPosts.length}\nRejected: ${rejectedPosts.length}\nUnprocessed: ${unprocessedPosts.length}\n\nWould you like to process the accepted posts?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Process', onPress: () => {
+          // TODO: Implement post processing logic
+          console.log('Processing accepted posts:', acceptedPosts);
+          Alert.alert('Success', 'Posts processed successfully!');
+        }}
+      ]
+    );
+  };
 
   return (
     <ScrollView style={styles.container}>
@@ -450,31 +526,231 @@ export default function ScraperScreen() {
         onRequestClose={() => setModalVisible(false)}
       >
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}>
-          <View style={{ backgroundColor: '#fff', borderRadius: 10, padding: 20, width: '90%', maxHeight: '80%' }}>
+          <View style={{ backgroundColor: '#fff', borderRadius: 10, padding: 20, width: '90%', maxHeight: '90%' }}>
             <TouchableOpacity style={{ alignSelf: 'flex-end' }} onPress={() => setModalVisible(false)}>
               <Ionicons name="close" size={24} color="#333" />
             </TouchableOpacity>
             {selectedRun && (
-              <ScrollView>
-                <ThemedText style={styles.runIdText}>Run ID: {selectedRun.runId}</ThemedText>
-                <ThemedText>Status: {selectedRun.status}</ThemedText>
-                <ThemedText>Initiated: {new Date(selectedRun.initiatedAt).toLocaleString()}</ThemedText>
-                {selectedRun.completedAt && <ThemedText>Completed: {new Date(selectedRun.completedAt).toLocaleString()}</ThemedText>}
-                {selectedRun.error && <ThemedText style={styles.errorText}>Error: {selectedRun.error}</ThemedText>}
-                <ThemedText style={{ marginTop: 10, fontWeight: 'bold' }}>Scraped Data:</ThemedText>
+              <View style={{ flex: 1 }}>
+                {/* Run Info Header */}
+                <View style={{ marginBottom: 20 }}>
+                  <ThemedText style={styles.runIdText}>Run ID: {selectedRun.runId}</ThemedText>
+                  <ThemedText>Status: {selectedRun.status}</ThemedText>
+                  <ThemedText>Initiated: {new Date(selectedRun.initiatedAt).toLocaleString()}</ThemedText>
+                  {selectedRun.completedAt && <ThemedText>Completed: {new Date(selectedRun.completedAt).toLocaleString()}</ThemedText>}
+                  {selectedRun.error && <ThemedText style={styles.errorText}>Error: {selectedRun.error}</ThemedText>}
+                </View>
+
+                {/* Post Navigation and Content */}
                 {isScrapedDataLoading ? (
-                  <ActivityIndicator size="small" color="#007AFF" />
+                  <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                    <ActivityIndicator size="large" color="#007AFF" />
+                    <ThemedText style={{ marginTop: 10 }}>Loading scraped data...</ThemedText>
+                  </View>
                 ) : scrapedData.length > 0 ? (
-                  scrapedData.map((item, idx) => (
-                    <View key={idx} style={styles.scrapedDataItem}>
-                      <ThemedText style={styles.scrapedDataTitle}>{item.title || item.id || `Item ${idx + 1}`}</ThemedText>
-                      <ThemedText>{JSON.stringify(item, null, 2)}</ThemedText>
+                  <View style={{ flex: 1 }}>
+                    {/* Post Counter */}
+                    <ThemedText style={{ textAlign: 'center', marginBottom: 10, fontWeight: 'bold' }}>
+                      Post {currentPostIndex + 1} of {scrapedData.length}
+                    </ThemedText>
+
+                    {/* Post Navigation Arrows */}
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 }}>
+                      <TouchableOpacity
+                        onPress={goToPreviousPost}
+                        disabled={currentPostIndex === 0}
+                        style={[styles.navButton, currentPostIndex === 0 && styles.disabledButton]}
+                      >
+                        <Ionicons name="chevron-back" size={24} color={currentPostIndex === 0 ? "#ccc" : "#007AFF"} />
+                      </TouchableOpacity>
+                      
+                      <TouchableOpacity
+                        onPress={goToNextPost}
+                        disabled={currentPostIndex === scrapedData.length - 1}
+                        style={[styles.navButton, currentPostIndex === scrapedData.length - 1 && styles.disabledButton]}
+                      >
+                        <Ionicons name="chevron-forward" size={24} color={currentPostIndex === scrapedData.length - 1 ? "#ccc" : "#007AFF"} />
+                      </TouchableOpacity>
                     </View>
-                  ))
+
+                    {/* Current Post Content */}
+                    <ScrollView style={{ flex: 1, marginBottom: 10 }}>
+                      {(() => {
+                        const currentPost = scrapedData[currentPostIndex];
+                        const images = getPostImages(currentPost);
+                        
+                        return (
+                          <View>
+                            {/* Image Carousel */}
+                            {images.length > 0 && (
+                              <View style={styles.imageContainer}>
+                                <View style={styles.imageWrapper}>
+                                  {imageLoadErrors[images[currentImageIndex]] ? (
+                                    <View style={styles.imageErrorContainer}>
+                                      <Ionicons name="image-outline" size={48} color="#ccc" />
+                                      <ThemedText style={styles.imageErrorText}>
+                                        Image not available
+                                      </ThemedText>
+                                      <ThemedText style={styles.imageErrorSubtext}>
+                                        (CORS restricted)
+                                      </ThemedText>
+                                    </View>
+                                  ) : (
+                                    <View style={styles.imageDisplayContainer}>
+                                      {Platform.OS === 'web' ? (
+                                        <img
+                                          src={`https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}&t=${Date.now()}`}
+                                          alt="Instagram post"
+                                          style={styles.image}
+                                          onError={() => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
+                                          onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
+                                        />
+                                      ) : (
+                                        <Image
+                                          source={{
+                                            uri: `https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}&t=${Date.now()}`
+                                          }}
+                                          style={styles.image}
+                                          onError={() => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
+                                          onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
+                                        />
+                                      )}
+                                    </View>
+                                  )}
+                                </View>
+                                
+                                {/* Image Navigation */}
+                                {images.length > 1 && (
+                                  <View style={styles.imageNavigation}>
+                                    <TouchableOpacity
+                                      onPress={goToPreviousImage}
+                                      disabled={currentImageIndex === 0}
+                                      style={[styles.imageNavButton, currentImageIndex === 0 && styles.disabledButton]}
+                                    >
+                                      <Ionicons name="chevron-back" size={20} color={currentImageIndex === 0 ? "#ccc" : "#007AFF"} />
+                                    </TouchableOpacity>
+                                    
+                                    {/* Image Dots */}
+                                    <View style={styles.imageDots}>
+                                      {images.map((_, index) => (
+                                        <View
+                                          key={index}
+                                          style={[
+                                            styles.dot,
+                                            index === currentImageIndex && styles.activeDot
+                                          ]}
+                                        />
+                                      ))}
+                                    </View>
+                                    
+                                    <TouchableOpacity
+                                      onPress={goToNextImage}
+                                      disabled={currentImageIndex === images.length - 1}
+                                      style={[styles.imageNavButton, currentImageIndex === images.length - 1 && styles.disabledButton]}
+                                    >
+                                      <Ionicons name="chevron-forward" size={20} color={currentImageIndex === images.length - 1 ? "#ccc" : "#007AFF"} />
+                                    </TouchableOpacity>
+                                  </View>
+                                )}
+                              </View>
+                            )}
+
+                            {/* Post Text */}
+                            <View style={styles.postTextContainer}>
+                              <ThemedText style={styles.postText}>
+                                {currentPost.caption || currentPost.text || 'No text content'}
+                              </ThemedText>
+                            </View>
+
+                            {/* Post Metadata */}
+                            <View style={styles.postMetadata}>
+                              <ThemedText style={styles.metadataText}>
+                                Username: {currentPost.ownerUsername || 'Unknown'}
+                              </ThemedText>
+                              <ThemedText style={styles.metadataText}>
+                                Posted: {currentPost.timestamp ? new Date(currentPost.timestamp).toLocaleString() : 'Unknown date'}
+                              </ThemedText>
+                              {currentPost.likesCount && (
+                                <ThemedText style={styles.metadataText}>
+                                  Likes: {currentPost.likesCount}
+                                </ThemedText>
+                              )}
+                              {currentPost.commentsCount && (
+                                <ThemedText style={styles.metadataText}>
+                                  Comments: {currentPost.commentsCount}
+                                </ThemedText>
+                              )}
+                            </View>
+                          </View>
+                        );
+                      })()}
+                    </ScrollView>
+
+                    {/* Fixed Decision Buttons */}
+                    <View style={styles.decisionButtons}>
+                      <TouchableOpacity
+                        style={[
+                          styles.decisionButton,
+                          styles.rejectButton,
+                          postDecisions[currentPostIndex] === 'reject' && styles.selectedRejectButton
+                        ]}
+                        onPress={() => handlePostDecision('reject')}
+                      >
+                        <Ionicons 
+                          name="close-circle" 
+                          size={20} 
+                          color={postDecisions[currentPostIndex] === 'reject' ? '#ff4444' : '#fff'} 
+                        />
+                        <ThemedText 
+                          style={[
+                            styles.decisionButtonText,
+                            { color: postDecisions[currentPostIndex] === 'reject' ? '#ff4444' : '#fff' }
+                          ]}
+                        >
+                          Reject
+                        </ThemedText>
+                      </TouchableOpacity>
+                      
+                      <TouchableOpacity
+                        style={[
+                          styles.decisionButton,
+                          styles.acceptButton,
+                          postDecisions[currentPostIndex] === 'accept' && styles.selectedAcceptButton
+                        ]}
+                        onPress={() => handlePostDecision('accept')}
+                      >
+                        <Ionicons 
+                          name="checkmark-circle" 
+                          size={20} 
+                          color={postDecisions[currentPostIndex] === 'accept' ? '#007AFF' : '#fff'} 
+                        />
+                        <ThemedText 
+                          style={[
+                            styles.decisionButtonText,
+                            { color: postDecisions[currentPostIndex] === 'accept' ? '#007AFF' : '#fff' }
+                          ]}
+                        >
+                          Accept
+                        </ThemedText>
+                      </TouchableOpacity>
+                    </View>
+
+                    {/* Process Posts Button */}
+                    <View style={styles.processButtonContainer}>
+                      <TouchableOpacity
+                        style={styles.processButton}
+                        onPress={handleProcessPosts}
+                      >
+                        <ThemedText style={styles.processButtonText}>Process Posts</ThemedText>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
                 ) : (
-                  <ThemedText>No scraped data found.</ThemedText>
+                  <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                    <ThemedText>No scraped data found.</ThemedText>
+                  </View>
                 )}
-              </ScrollView>
+              </View>
             )}
           </View>
         </View>
@@ -640,5 +916,179 @@ const styles = StyleSheet.create({
     padding: 10,
     marginBottom: 8,
     backgroundColor: '#fafbfc',
+  },
+  navButton: {
+    padding: 10,
+    borderRadius: 20,
+    backgroundColor: '#f0f0f0',
+  },
+  imageContainer: {
+    flex: 1,
+    position: 'relative',
+  },
+  imageWrapper: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  postImage: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'contain',
+  },
+  imageNavigation: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 10,
+  },
+  imageNavButton: {
+    padding: 10,
+  },
+  disabledButton: {
+    opacity: 0.5,
+  },
+  imageDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#ccc',
+    margin: 4,
+  },
+  activeDot: {
+    backgroundColor: '#007AFF',
+  },
+  postTextContainer: {
+    padding: 10,
+  },
+  postText: {
+    fontSize: 16,
+  },
+  postMetadata: {
+    padding: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+  },
+  metadataText: {
+    fontSize: 14,
+    color: '#666',
+  },
+  decisionButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 15,
+    gap: 15,
+  },
+  decisionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 15,
+    borderRadius: 8,
+    borderWidth: 2,
+    minHeight: 50,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  rejectButton: {
+    backgroundColor: '#ff4444',
+    borderColor: '#ff4444',
+  },
+  selectedRejectButton: {
+    backgroundColor: '#fff',
+    borderColor: '#ff4444',
+  },
+  acceptButton: {
+    backgroundColor: '#007AFF',
+    borderColor: '#007AFF',
+  },
+  selectedAcceptButton: {
+    backgroundColor: '#fff',
+    borderColor: '#007AFF',
+  },
+  decisionButtonText: {
+    fontWeight: 'bold',
+    fontSize: 16,
+    marginLeft: 8,
+  },
+  processButtonContainer: {
+    padding: 15,
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+    backgroundColor: '#f8f9fa',
+  },
+  processButton: {
+    padding: 15,
+    borderRadius: 8,
+    backgroundColor: '#28a745',
+    borderWidth: 2,
+    borderColor: '#28a745',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  processButtonText: {
+    fontWeight: 'bold',
+    color: '#fff',
+    fontSize: 16,
+    textAlign: 'center',
+  },
+  imageErrorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageErrorText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  imageErrorSubtext: {
+    fontSize: 14,
+    color: '#666',
+  },
+  imageDebugContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  debugTitle: {
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  debugUrl: {
+    color: '#007AFF',
+    fontWeight: 'bold',
+  },
+  debugInfo: {
+    color: '#666',
+  },
+  imageDisplayContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  image: {
+    width: '100%',
+    height: 300,
+    resizeMode: 'contain',
   },
 });
