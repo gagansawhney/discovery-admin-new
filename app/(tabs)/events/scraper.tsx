@@ -4,13 +4,14 @@ import { ThemedView } from '@/components/ThemedView';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Button, Image, Modal, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Button, Image, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 const START_SCRAPER_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/startInstagramScraper';
 const GET_RUNS_LIST_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/getApifyRunsList';
 const ADD_USERNAME_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/addUsername';
 const DELETE_USERNAME_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/deleteUsername';
 const LIST_USERNAMES_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/listUsernames';
+const DELETE_APIFY_RUN_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/deleteApifyRun';
 
 interface ApifyRun {
   runId: string;
@@ -51,8 +52,12 @@ export default function ScraperScreen() {
   const [currentPostIndex, setCurrentPostIndex] = useState(0);
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [postDecisions, setPostDecisions] = useState<{[key: number]: 'accept' | 'reject' | null}>({});
+  const [processingResults, setProcessingResults] = useState<any>(null);
+  const [postErrors, setPostErrors] = useState<{[key: number]: string}>({});
   const [imageLoadErrors, setImageLoadErrors] = useState<{[key: string]: boolean}>({});
   const [imageLoadSuccess, setImageLoadSuccess] = useState<{[key: string]: boolean}>({});
+  const [isPostDecisionLoading, setIsPostDecisionLoading] = useState(false);
+  const [isProcessingPostsLoading, setIsProcessingPostsLoading] = useState(false);
 
   const fetchApifyRuns = useCallback(async () => {
     setIsLoadingRuns(true);
@@ -141,6 +146,48 @@ export default function ScraperScreen() {
       }
     } catch (e) {
       Alert.alert('Error', 'Failed to delete username.');
+    }
+  };
+
+  // Delete Apify run and its contents
+  const handleDeleteApifyRun = async (runId: string) => {
+    const message = `Are you sure you want to delete this run and all its scraped data? This action cannot be undone.`;
+    
+    let shouldDelete = false;
+    
+    if (Platform.OS === 'web') {
+      shouldDelete = window.confirm(message);
+    } else {
+      // For native platforms, we'll need to implement a different approach
+      // For now, let's just proceed without confirmation on native
+      shouldDelete = true;
+    }
+
+    if (shouldDelete) {
+      try {
+        const response = await fetch(DELETE_APIFY_RUN_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ runId }),
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+          // Remove the run from the local state
+          setApifyRuns(prev => prev.filter(run => run.runId !== runId));
+          
+          // If the deleted run was the selected run, close the modal
+          if (selectedRun && selectedRun.runId === runId) {
+            setModalVisible(false);
+            setSelectedRun(null);
+          }
+          
+          Alert.alert('Success', 'Run deleted successfully.');
+        } else {
+          Alert.alert('Error', data.error || 'Failed to delete run.');
+        }
+      } catch (e) {
+        Alert.alert('Error', 'Failed to delete run.');
+      }
     }
   };
 
@@ -280,6 +327,14 @@ export default function ScraperScreen() {
       const data = await response.json();
       if (data.success && Array.isArray(data.data)) {
         setScrapedData(data.data);
+        // Reset all state when fetching new data
+        setCurrentPostIndex(0);
+        setCurrentImageIndex(0);
+        setPostDecisions({});
+        setPostErrors({});
+        setImageLoadErrors({});
+        setImageLoadSuccess({});
+        setProcessingResults(null);
       } else {
         setScrapedData([]);
       }
@@ -293,10 +348,6 @@ export default function ScraperScreen() {
   useEffect(() => {
     if (modalVisible && selectedRun && selectedRun.runId && selectedRun.datasetId) {
       fetchScrapedData(selectedRun.runId, selectedRun.datasetId);
-      // Reset navigation state when modal opens
-      setCurrentPostIndex(0);
-      setCurrentImageIndex(0);
-      setPostDecisions({});
     } else {
       setScrapedData([]);
     }
@@ -345,29 +396,177 @@ export default function ScraperScreen() {
   };
 
   const handlePostDecision = (decision: 'accept' | 'reject') => {
-    setPostDecisions(prev => ({
-      ...prev,
-      [currentPostIndex]: decision
-    }));
+    setIsPostDecisionLoading(true);
+    setPostDecisions(prev => {
+      const updated = { ...prev, [currentPostIndex]: decision };
+      if (currentPostIndex < scrapedData.length - 1) {
+        setTimeout(() => {
+          setCurrentPostIndex(currentPostIndex + 1);
+          setIsPostDecisionLoading(false);
+        }, 300);
+      } else {
+        setTimeout(() => setIsPostDecisionLoading(false), 300);
+      }
+      return updated;
+    });
   };
 
-  const handleProcessPosts = () => {
+  const handleProcessPosts = async () => {
+    console.log('🎯 handleProcessPosts function called!');
+    
     const acceptedPosts = scrapedData.filter((_, index) => postDecisions[index] === 'accept');
     const rejectedPosts = scrapedData.filter((_, index) => postDecisions[index] === 'reject');
     const unprocessedPosts = scrapedData.filter((_, index) => !postDecisions[index]);
+
+    console.log('🔍 PROCESS POSTS DEBUG:', {
+      totalPosts: scrapedData.length,
+      acceptedPosts: acceptedPosts.length,
+      rejectedPosts: rejectedPosts.length,
+      unprocessedPosts: unprocessedPosts.length,
+      postDecisions: postDecisions,
+      scrapedDataSample: scrapedData.slice(0, 2) // First 2 posts for debugging
+    });
+
+    const message = `Accepted: ${acceptedPosts.length}\nRejected: ${rejectedPosts.length}\nUnprocessed: ${unprocessedPosts.length}\n\nWould you like to process the accepted posts?`;
     
-    Alert.alert(
-      'Process Posts',
-      `Accepted: ${acceptedPosts.length}\nRejected: ${rejectedPosts.length}\nUnprocessed: ${unprocessedPosts.length}\n\nWould you like to process the accepted posts?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Process', onPress: () => {
-          // TODO: Implement post processing logic
-          console.log('Processing accepted posts:', acceptedPosts);
-          Alert.alert('Success', 'Posts processed successfully!');
-        }}
-      ]
-    );
+    let shouldProcess = false;
+    
+    if (Platform.OS === 'web') {
+      shouldProcess = window.confirm(message);
+    } else {
+      // For native platforms, we'll need to implement a different approach
+      // For now, let's just proceed without confirmation on native
+      shouldProcess = true;
+    }
+
+    if (shouldProcess) {
+      setIsProcessingPostsLoading(true);
+      try {
+        console.log('🔘 Process confirmed!');
+        console.log('🔍 About to start processing...');
+        console.log('🚀 Starting process...');
+        
+        // Prepare decisions array in order of scrapedData
+        const decisionsArr = scrapedData.map((_, idx) => postDecisions[idx] || 'reject');
+        console.log('📋 Decisions array:', decisionsArr);
+        
+        const requestPayload = { posts: scrapedData, decisions: decisionsArr };
+        console.log('📤 Request payload sample:', {
+          postsCount: requestPayload.posts.length,
+          decisionsCount: requestPayload.decisions.length,
+          firstPost: requestPayload.posts[0],
+          decisions: requestPayload.decisions
+        });
+        
+        // Call backend
+        const backendUrl = 'https://processinstagramposts-f3zapaqx6a-uc.a.run.app';
+        console.log('🌐 Calling backend at:', backendUrl);
+        
+        // Test the connection first
+        console.log('🧪 Testing connection...');
+        try {
+          const testResponse = await fetch(backendUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ posts: [], decisions: [] })
+          });
+          console.log('🧪 Test response:', testResponse.status, testResponse.ok);
+          const testResult = await testResponse.json();
+          console.log('🧪 Test result:', testResult);
+        } catch (testError) {
+          console.error('🧪 Test failed:', testError);
+        }
+        
+        let result;
+        try {
+          console.log('📤 Sending actual request...');
+          const response = await fetch(backendUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestPayload)
+          });
+          
+          console.log('📥 Response status:', response.status, response.ok);
+          console.log('📥 Response headers:', Object.fromEntries(response.headers.entries()));
+          
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error('❌ Response error:', errorText);
+            throw new Error(`HTTP ${response.status}: ${errorText}`);
+          }
+          
+          result = await response.json();
+          console.log('📥 Response data:', result);
+        } catch (fetchError) {
+          console.error('💥 Fetch error details:', fetchError);
+          throw fetchError;
+        }
+        
+        if (result.success) {
+          console.log('✅ Backend processing successful');
+          console.log('📊 Results:', result.results);
+          
+          // Remove processed posts from UI (accepted and rejected)
+          // Keep only the posts that failed processing
+          const failedIndexes = (result.results.errors || []).map((e: { postIndex: number }) => e.postIndex);
+          console.log('❌ Failed indexes:', failedIndexes);
+          
+          // Keep only the posts that failed (they remain for review)
+          const remainingPosts = scrapedData.filter((_, idx) => failedIndexes.includes(idx));
+          console.log('📝 Remaining posts count:', remainingPosts.length);
+          
+          // Store error messages for failed posts
+          const newPostErrors: {[key: number]: string} = {};
+          (result.results.errors || []).forEach((error: { postIndex: number, error: string }) => {
+            newPostErrors[error.postIndex] = error.error;
+          });
+          setPostErrors(newPostErrors);
+          
+          // Update the scraped data to only show failed posts
+          setScrapedData(remainingPosts);
+          
+          // Clear decisions for remaining posts and reset navigation
+          const newDecisions: {[key: number]: 'accept' | 'reject' | null} = {};
+          remainingPosts.forEach((_, idx) => {
+            newDecisions[idx] = null;
+          });
+          setPostDecisions(newDecisions);
+          setCurrentPostIndex(0);
+          setCurrentImageIndex(0);
+          
+          if (result.results.failed > 0) {
+            console.log('⚠️ Some posts failed processing');
+            if (Platform.OS === 'web') {
+              alert(`${result.results.failed} post(s) could not be processed. They remain for review with error details.`);
+            }
+          } else {
+            console.log('🎉 All posts processed successfully');
+            if (Platform.OS === 'web') {
+              alert('All posts processed successfully!');
+            }
+            // Keep modal open but refresh the data
+            if (selectedRun) {
+              fetchScrapedData(selectedRun.runId, selectedRun.datasetId);
+            }
+          }
+        } else {
+          console.log('❌ Backend processing failed:', result.error);
+          if (Platform.OS === 'web') {
+            alert(`Error: ${result.error || 'Processing failed.'}`);
+          }
+        }
+      } catch (err) {
+        console.error('💥 Network error:', err);
+        console.error('💥 Error stack:', (err as Error).stack);
+        if (Platform.OS === 'web') {
+          alert('Network or server error during processing.');
+        }
+      } finally {
+        setIsProcessingPostsLoading(false);
+      }
+    } else {
+      console.log('❌ Process cancelled by user');
+    }
   };
 
   return (
@@ -501,17 +700,24 @@ export default function ScraperScreen() {
             <ThemedText>No completed runs.</ThemedText>
           ) : (
             completedRuns.map(run => (
-              <TouchableOpacity
-                key={run.runId}
-                style={styles.runItem}
-                onPress={() => { setSelectedRun(run); setModalVisible(true); }}
-              >
-                <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
-                <ThemedText>Status: {run.status}</ThemedText>
-                <ThemedText>Initiated: {new Date(run.initiatedAt).toLocaleString()}</ThemedText>
-                {run.completedAt && <ThemedText>Completed: {new Date(run.completedAt).toLocaleString()}</ThemedText>}
-                {run.error && <ThemedText style={styles.errorText}>Error: {run.error}</ThemedText>}
-              </TouchableOpacity>
+              <View key={run.runId} style={styles.runItem}>
+                <TouchableOpacity
+                  style={styles.runContent}
+                  onPress={() => { setSelectedRun(run); setModalVisible(true); }}
+                >
+                  <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
+                  <ThemedText>Status: {run.status}</ThemedText>
+                  <ThemedText>Initiated: {new Date(run.initiatedAt).toLocaleString()}</ThemedText>
+                  {run.completedAt && <ThemedText>Completed: {new Date(run.completedAt).toLocaleString()}</ThemedText>}
+                  {run.error && <ThemedText style={styles.errorText}>Error: {run.error}</ThemedText>}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.deleteButton}
+                  onPress={() => handleDeleteApifyRun(run.runId)}
+                >
+                  <Ionicons name="trash-outline" size={20} color="#ff4444" />
+                </TouchableOpacity>
+              </View>
             ))
           )
         )}
@@ -530,7 +736,14 @@ export default function ScraperScreen() {
             <TouchableOpacity style={{ alignSelf: 'flex-end' }} onPress={() => setModalVisible(false)}>
               <Ionicons name="close" size={24} color="#333" />
             </TouchableOpacity>
-            {selectedRun && (
+            { (isPostDecisionLoading || isProcessingPostsLoading) ? (
+              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', minHeight: 200 }}>
+                <ActivityIndicator size="large" color="#007AFF" />
+                <ThemedText style={{ marginTop: 10 }}>
+                  {isProcessingPostsLoading ? 'Processing posts...' : 'Loading next post...'}
+                </ThemedText>
+              </View>
+            ) : selectedRun && (
               <View style={{ flex: 1 }}>
                 {/* Run Info Header */}
                 <View style={{ marginBottom: 20 }}>
@@ -599,7 +812,7 @@ export default function ScraperScreen() {
                                     <View style={styles.imageDisplayContainer}>
                                       {Platform.OS === 'web' ? (
                                         <img
-                                          src={`https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}&t=${Date.now()}`}
+                                          src={`https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`}
                                           alt="Instagram post"
                                           style={styles.image}
                                           onError={() => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
@@ -608,7 +821,7 @@ export default function ScraperScreen() {
                                       ) : (
                                         <Image
                                           source={{
-                                            uri: `https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}&t=${Date.now()}`
+                                            uri: `https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`
                                           }}
                                           style={styles.image}
                                           onError={() => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
@@ -681,6 +894,14 @@ export default function ScraperScreen() {
                                 </ThemedText>
                               )}
                             </View>
+                            
+                            {/* Error message for failed posts */}
+                            {postErrors[currentPostIndex] && (
+                              <View style={styles.errorContainer}>
+                                <Text style={styles.errorTitle}>❌ Processing Failed</Text>
+                                <Text style={styles.errorMessage}>{postErrors[currentPostIndex]}</Text>
+                              </View>
+                            )}
                           </View>
                         );
                       })()}
@@ -854,6 +1075,15 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 10,
     marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  runContent: {
+    flex: 1,
+  },
+  deleteButton: {
+    padding: 8,
+    marginLeft: 10,
   },
   runIdText: {
     fontWeight: 'bold',
@@ -1090,5 +1320,27 @@ const styles = StyleSheet.create({
     width: '100%',
     height: 300,
     resizeMode: 'contain',
+  },
+  caption: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  errorContainer: {
+    padding: 10,
+    borderWidth: 1,
+    borderColor: 'red',
+    borderRadius: 4,
+    backgroundColor: '#fff',
+  },
+  errorTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: 'red',
+    marginBottom: 5,
+  },
+  errorMessage: {
+    fontSize: 14,
+    color: 'red',
   },
 });
