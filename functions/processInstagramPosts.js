@@ -4,6 +4,7 @@ const logger = require('firebase-functions/logger');
 const cors = require('cors')({ origin: true, credentials: true });
 const fetch = require('node-fetch');
 const { v4: uuidv4 } = require('uuid');
+const OpenAI = require('openai');
 
 // Helper function to process a single accepted post
 async function processAcceptedPost(post, originalIndex, results) {
@@ -277,7 +278,32 @@ async function extractEventInfo(storagePath, post) {
 async function saveEventToFirestore(eventData, post) {
   try {
     logger.info(`--- saveEventToFirestore: Starting save ---`, { eventName: eventData.name });
-    
+
+    // Generate embedding for searchText
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.trim() : undefined;
+    if (!OPENAI_API_KEY) {
+      throw new Error('OpenAI API key not configured');
+    }
+    if (!eventData.searchText || typeof eventData.searchText !== 'string' || !eventData.searchText.trim()) {
+      throw new Error('searchText is required for embedding');
+    }
+    const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+    let embedding = null;
+    try {
+      const embeddingResp = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: eventData.searchText
+      });
+      embedding = embeddingResp.data[0].embedding;
+      if (!embedding || !Array.isArray(embedding)) {
+        throw new Error('OpenAI embedding API did not return a valid embedding');
+      }
+    } catch (embedErr) {
+      logger.error('Error generating embedding', { error: embedErr.message, searchText: eventData.searchText });
+      throw new Error('Failed to generate embedding: ' + embedErr.message);
+    }
+    eventData.embedding = embedding;
+
     // Add source information
     const eventWithSource = {
       ...eventData,
@@ -289,18 +315,18 @@ async function saveEventToFirestore(eventData, post) {
       },
       updatedAt: new Date().toISOString()
     };
-    
+
     // Generate unique ID if not provided
     if (!eventWithSource.id) {
       eventWithSource.id = uuidv4();
     }
-    
+
     // Save to events collection
     const eventRef = externalDb.collection('events').doc(eventWithSource.id);
     await eventRef.set(eventWithSource);
-    
+
     logger.info(`--- saveEventToFirestore: Save successful ---`, { eventId: eventWithSource.id });
-    
+
     return eventWithSource.id;
   } catch (error) {
     logger.error(`--- saveEventToFirestore: Save failed ---`, { eventName: eventData.name, error: error.message });
