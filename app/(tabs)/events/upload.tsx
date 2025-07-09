@@ -309,6 +309,17 @@ export default function UploadScreen() {
       const data = await extractResp.json();
       console.log('📄 Extract response data:', data);
       
+      // Always overwrite venue with canonical venue if available, regardless of match type
+      console.log('Venue validation result:', data.venueValidation);
+      console.log('Event data before canonicalization:', data.data);
+      if (data.venueValidation && data.venueValidation.venue) {
+        if (!data.data.venue) data.data.venue = {};
+        data.data.venue.name = data.venueValidation.venue.name;
+        data.data.venue.address = data.venueValidation.venue.address;
+        data.data.venue.id = data.venueValidation.venue.id;
+      }
+      console.log('Event data after canonicalization:', data.data);
+      
       // Save extracted data to database
       console.log('💾 Attempting to save extracted data to database...');
       const saveResp = await fetch(SAVE_EVENT_URL, {

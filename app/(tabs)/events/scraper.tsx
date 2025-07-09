@@ -3,7 +3,7 @@ import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Button, Image, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 const START_SCRAPER_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/startInstagramScraper';
@@ -23,6 +23,18 @@ interface ApifyRun {
   numberOfPosts: number;
   error?: string;
   scrapedData?: any[];
+}
+
+// Polyfill EventSource for React Native and web
+let EventSourceImpl: any = undefined;
+if (typeof window !== 'undefined' && window.EventSource) {
+  EventSourceImpl = window.EventSource;
+} else {
+  try {
+    EventSourceImpl = require('react-native-event-source');
+  } catch (e) {
+    // Not available, will error if used on native without install
+  }
 }
 
 export default function ScraperScreen() {
@@ -54,10 +66,12 @@ export default function ScraperScreen() {
   const [postDecisions, setPostDecisions] = useState<{[key: number]: 'accept' | 'reject' | null}>({});
   const [processingResults, setProcessingResults] = useState<any>(null);
   const [postErrors, setPostErrors] = useState<{[key: number]: string}>({});
-  const [imageLoadErrors, setImageLoadErrors] = useState<{[key: string]: boolean}>({});
+  const [imageLoadErrors, setImageLoadErrors] = useState<{[key: string]: boolean | string}>({});
   const [imageLoadSuccess, setImageLoadSuccess] = useState<{[key: string]: boolean}>({});
   const [isPostDecisionLoading, setIsPostDecisionLoading] = useState(false);
   const [isProcessingPostsLoading, setIsProcessingPostsLoading] = useState(false);
+  const [liveProcessingStatus, setLiveProcessingStatus] = useState<any[]>([]); // For SSE events
+  const [liveSummary, setLiveSummary] = useState<any>(null);
 
   const fetchApifyRuns = useCallback(async () => {
     setIsLoadingRuns(true);
@@ -413,160 +427,106 @@ export default function ScraperScreen() {
 
   const handleProcessPosts = async () => {
     console.log('🎯 handleProcessPosts function called!');
-    
     const acceptedPosts = scrapedData.filter((_, index) => postDecisions[index] === 'accept');
     const rejectedPosts = scrapedData.filter((_, index) => postDecisions[index] === 'reject');
     const unprocessedPosts = scrapedData.filter((_, index) => !postDecisions[index]);
-
-    console.log('🔍 PROCESS POSTS DEBUG:', {
-      totalPosts: scrapedData.length,
-      acceptedPosts: acceptedPosts.length,
-      rejectedPosts: rejectedPosts.length,
-      unprocessedPosts: unprocessedPosts.length,
-      postDecisions: postDecisions,
-      scrapedDataSample: scrapedData.slice(0, 2) // First 2 posts for debugging
-    });
-
     const message = `Accepted: ${acceptedPosts.length}\nRejected: ${rejectedPosts.length}\nUnprocessed: ${unprocessedPosts.length}\n\nWould you like to process the accepted posts?`;
-    
     let shouldProcess = false;
-    
     if (Platform.OS === 'web') {
       shouldProcess = window.confirm(message);
     } else {
-      // For native platforms, we'll need to implement a different approach
-      // For now, let's just proceed without confirmation on native
       shouldProcess = true;
     }
-
-    if (shouldProcess) {
-      setIsProcessingPostsLoading(true);
-      try {
-        console.log('🔘 Process confirmed!');
-        console.log('🔍 About to start processing...');
-        console.log('🚀 Starting process...');
-        
-        // Prepare decisions array in order of scrapedData
-        const decisionsArr = scrapedData.map((_, idx) => postDecisions[idx] || 'reject');
-        console.log('📋 Decisions array:', decisionsArr);
-        
-        const requestPayload = { posts: scrapedData, decisions: decisionsArr };
-        console.log('📤 Request payload sample:', {
-          postsCount: requestPayload.posts.length,
-          decisionsCount: requestPayload.decisions.length,
-          firstPost: requestPayload.posts[0],
-          decisions: requestPayload.decisions
+    if (!shouldProcess) return;
+    setIsProcessingPostsLoading(true);
+    setLiveProcessingStatus([]);
+    setLiveSummary(null);
+    try {
+      // Prepare decisions array in order of scrapedData
+      const decisionsArr = scrapedData.map((_, idx) =>
+        postDecisions[idx] === 'accept' ? 'accept' : postDecisions[idx] === 'reject' ? 'reject' : null
+      );
+      const requestPayload = { posts: scrapedData, decisions: decisionsArr };
+      const backendUrl = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/processInstagramPosts';
+      if (Platform.OS === 'web') {
+        // Web: Use fetch/POST, no SSE
+        const response = await fetch(backendUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestPayload)
         });
-        
-        // Call backend
-        const backendUrl = 'https://processinstagramposts-f3zapaqx6a-uc.a.run.app';
-        console.log('🌐 Calling backend at:', backendUrl);
-        
-        // Test the connection first
-        console.log('🧪 Testing connection...');
-        try {
-          const testResponse = await fetch(backendUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ posts: [], decisions: [] })
-          });
-          console.log('🧪 Test response:', testResponse.status, testResponse.ok);
-          const testResult = await testResponse.json();
-          console.log('🧪 Test result:', testResult);
-        } catch (testError) {
-          console.error('🧪 Test failed:', testError);
-        }
-        
-        let result;
-        try {
-          console.log('📤 Sending actual request...');
-          const response = await fetch(backendUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestPayload)
-          });
-          
-          console.log('📥 Response status:', response.status, response.ok);
-          console.log('📥 Response headers:', Object.fromEntries(response.headers.entries()));
-          
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error('❌ Response error:', errorText);
-            throw new Error(`HTTP ${response.status}: ${errorText}`);
-          }
-          
-          result = await response.json();
-          console.log('📥 Response data:', result);
-        } catch (fetchError) {
-          console.error('💥 Fetch error details:', fetchError);
-          throw fetchError;
-        }
-        
-        if (result.success) {
-          console.log('✅ Backend processing successful');
-          console.log('📊 Results:', result.results);
-          
-          // Remove processed posts from UI (accepted and rejected)
-          // Keep only the posts that failed processing
-          const failedIndexes = (result.results.errors || []).map((e: { postIndex: number }) => e.postIndex);
-          console.log('❌ Failed indexes:', failedIndexes);
-          
-          // Keep only the posts that failed (they remain for review)
-          const remainingPosts = scrapedData.filter((_, idx) => failedIndexes.includes(idx));
-          console.log('📝 Remaining posts count:', remainingPosts.length);
-          
-          // Store error messages for failed posts
-          const newPostErrors: {[key: number]: string} = {};
-          (result.results.errors || []).forEach((error: { postIndex: number, error: string }) => {
-            newPostErrors[error.postIndex] = error.error;
-          });
-          setPostErrors(newPostErrors);
-          
-          // Update the scraped data to only show failed posts
-          setScrapedData(remainingPosts);
-          
-          // Clear decisions for remaining posts and reset navigation
-          const newDecisions: {[key: number]: 'accept' | 'reject' | null} = {};
-          remainingPosts.forEach((_, idx) => {
-            newDecisions[idx] = null;
-          });
-          setPostDecisions(newDecisions);
-          setCurrentPostIndex(0);
-          setCurrentImageIndex(0);
-          
-          if (result.results.failed > 0) {
-            console.log('⚠️ Some posts failed processing');
-            if (Platform.OS === 'web') {
-              alert(`${result.results.failed} post(s) could not be processed. They remain for review with error details.`);
-            }
-          } else {
-            console.log('🎉 All posts processed successfully');
-            if (Platform.OS === 'web') {
-              alert('All posts processed successfully!');
-            }
-            // Keep modal open but refresh the data
-            if (selectedRun) {
-              fetchScrapedData(selectedRun.runId, selectedRun.datasetId);
-            }
-          }
-        } else {
-          console.log('❌ Backend processing failed:', result.error);
-          if (Platform.OS === 'web') {
-            alert(`Error: ${result.error || 'Processing failed.'}`);
-          }
-        }
-      } catch (err) {
-        console.error('💥 Network error:', err);
-        console.error('💥 Error stack:', (err as Error).stack);
-        if (Platform.OS === 'web') {
-          alert('Network or server error during processing.');
-        }
-      } finally {
+        const result = await response.json();
+        setLiveSummary(result.results);
         setIsProcessingPostsLoading(false);
+      } else {
+        // Native: Use SSE
+        const eventSource = new EventSourceImpl(backendUrl, {
+          headers: { 'Content-Type': 'application/json' },
+          payload: JSON.stringify(requestPayload),
+          method: 'POST',
+        });
+        let statusUpdates: any[] = [];
+        eventSource.onmessage = (event: any) => {
+          // Default event
+          console.log('SSE message:', event.data);
+        };
+        eventSource.addEventListener('rejected', (event: any) => {
+          const data = JSON.parse(event.data);
+          statusUpdates.push({ type: 'rejected', ...data });
+          setLiveProcessingStatus([...statusUpdates]);
+        });
+        eventSource.addEventListener('processed', (event: any) => {
+          const data = JSON.parse(event.data);
+          statusUpdates.push({ type: 'processed', ...data });
+          setLiveProcessingStatus([...statusUpdates]);
+        });
+        eventSource.addEventListener('error', (event: any) => {
+          const data = JSON.parse(event.data);
+          statusUpdates.push({ type: 'error', ...data });
+          setLiveProcessingStatus([...statusUpdates]);
+        });
+        eventSource.addEventListener('summary', (event: any) => {
+          const data = JSON.parse(event.data);
+          setLiveSummary(data);
+          setIsProcessingPostsLoading(false);
+          eventSource.close();
+        });
       }
-    } else {
-      console.log('❌ Process cancelled by user');
+    } catch (err) {
+      setIsProcessingPostsLoading(false);
+      let msg = 'Error during processing.';
+      if (err && typeof err === 'object' && 'message' in err) {
+        msg = (err as any).message;
+      }
+      alert('Error during processing: ' + msg);
     }
+  };
+
+  const handleSummaryOk = () => {
+    if (liveSummary && liveSummary.errors) {
+      // Get failed post indexes
+      const failedIndexes = (liveSummary.errors || []).map((e: { postIndex: number }) => e.postIndex);
+      // Keep posts that failed OR were not processed (no decision)
+      const remainingPosts = scrapedData.filter((_, idx) =>
+        failedIndexes.includes(idx) || !postDecisions[idx]
+      );
+      // Store error messages for failed posts
+      const newPostErrors: {[key: number]: string} = {};
+      (liveSummary.errors || []).forEach((error: { postIndex: number, error: string }) => {
+        newPostErrors[error.postIndex] = error.error;
+      });
+      setPostErrors(newPostErrors);
+      setScrapedData(remainingPosts);
+      // Clear decisions for remaining posts and reset navigation
+      const newDecisions: {[key: number]: 'accept' | 'reject' | null} = {};
+      remainingPosts.forEach((_, idx) => {
+        newDecisions[idx] = null;
+      });
+      setPostDecisions(newDecisions);
+      setCurrentPostIndex(0);
+      setCurrentImageIndex(0);
+    }
+    setLiveSummary(null);
   };
 
   return (
@@ -805,17 +765,23 @@ export default function ScraperScreen() {
                                         Image not available
                                       </ThemedText>
                                       <ThemedText style={styles.imageErrorSubtext}>
-                                        (CORS restricted)
+                                        {typeof imageLoadErrors[images[currentImageIndex]] === 'string' && imageLoadErrors[images[currentImageIndex]]}
+                                        {typeof imageLoadErrors[images[currentImageIndex]] !== 'string' && '(CORS restricted or failed to load)'}
                                       </ThemedText>
                                     </View>
-                                  ) : (
-                                    <View style={styles.imageDisplayContainer}>
+                                  ) : !imageLoadSuccess[images[currentImageIndex]] ? (
+                                    // Show loader while image is loading
+                                    <ImageLoaderWithTimeout
+                                      imageUrl={images[currentImageIndex]}
+                                      onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
+                                      onError={(errMsg) => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: errMsg || true }))}
+                                    >
                                       {Platform.OS === 'web' ? (
                                         <img
                                           src={`https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`}
                                           alt="Instagram post"
                                           style={styles.image}
-                                          onError={() => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
+                                          onError={(e) => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: e?.message || 'Failed to load image' }))}
                                           onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
                                         />
                                       ) : (
@@ -824,8 +790,25 @@ export default function ScraperScreen() {
                                             uri: `https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`
                                           }}
                                           style={styles.image}
-                                          onError={() => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
+                                          onError={(e) => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: (e?.nativeEvent?.error || 'Failed to load image') }))}
                                           onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
+                                        />
+                                      )}
+                                    </ImageLoaderWithTimeout>
+                                  ) : (
+                                    <View style={styles.imageDisplayContainer}>
+                                      {Platform.OS === 'web' ? (
+                                        <img
+                                          src={`https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`}
+                                          alt="Instagram post"
+                                          style={styles.image}
+                                        />
+                                      ) : (
+                                        <Image
+                                          source={{
+                                            uri: `https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`
+                                          }}
+                                          style={styles.image}
                                         />
                                       )}
                                     </View>
@@ -1017,8 +1000,104 @@ export default function ScraperScreen() {
           />
         </View>
       </ThemedView>
+
+      {/* Live Processing Status and Summary Modal */}
+      <Modal
+        visible={isProcessingPostsLoading || liveSummary !== null}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={handleSummaryOk}
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}>
+          <View style={{ backgroundColor: '#fff', borderRadius: 10, padding: 20, width: '90%', maxHeight: '90%' }}>
+            <TouchableOpacity style={{ alignSelf: 'flex-end' }} onPress={handleSummaryOk}>
+              <Ionicons name="close" size={24} color="#333" />
+            </TouchableOpacity>
+            <ThemedText style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 10 }}>Processing Status</ThemedText>
+            {isProcessingPostsLoading ? (
+              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                <ActivityIndicator size="large" color="#007AFF" />
+                <ThemedText style={{ marginTop: 10 }}>Processing posts...</ThemedText>
+              </View>
+            ) : liveSummary ? (
+              <ScrollView style={{ maxHeight: '70%' }}>
+                <View style={{ marginTop: 20, paddingTop: 15, borderTopWidth: 1, borderTopColor: '#eee' }}>
+                  <ThemedText style={{ fontWeight: 'bold', fontSize: 18, marginBottom: 10 }}>Processing Summary</ThemedText>
+                  <ThemedText>Total Posts: {(liveSummary.processed || 0) + (liveSummary.deleted || 0) + (liveSummary.failed || 0)}</ThemedText>
+                  <ThemedText>Accepted: {liveSummary.successful || 0}</ThemedText>
+                  <ThemedText>Rejected: {liveSummary.deleted || 0}</ThemedText>
+                  <ThemedText>Failed to Process: {liveSummary.failed || 0}</ThemedText>
+                  <ThemedText>Total Errors: {(liveSummary.errors && liveSummary.errors.length) || 0}</ThemedText>
+                  {/* Optionally, show error details */}
+                  {liveSummary.errors && liveSummary.errors.length > 0 && (
+                    <View style={{ marginTop: 10 }}>
+                      <ThemedText style={{ fontWeight: 'bold' }}>Errors:</ThemedText>
+                      {liveSummary.errors.map((e: any, idx: number) => (
+                        <ThemedText key={idx} style={{ color: 'red' }}>• {e.error}</ThemedText>
+                      ))}
+                    </View>
+                  )}
+                  <TouchableOpacity
+                    style={{ marginTop: 20, alignSelf: 'center', backgroundColor: '#007AFF', padding: 12, borderRadius: 8 }}
+                    onPress={handleSummaryOk}
+                  >
+                    <ThemedText style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>OK</ThemedText>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
+}
+
+function ImageLoaderWithTimeout({ imageUrl, onLoad, onError, children }: {
+  imageUrl: string;
+  onLoad: () => void;
+  onError: (errMsg: string) => void;
+  children: React.ReactElement;
+}) {
+  const timeoutRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    timeoutRef.current = window.setTimeout(() => {
+      onError && onError('Image load timed out');
+    }, 10000); // 10 seconds
+    return () => {
+      if (timeoutRef.current !== undefined) clearTimeout(timeoutRef.current);
+    };
+  }, [imageUrl, onError]);
+  // If image loads or errors, clear the timeout
+  const handleLoad = () => {
+    if (timeoutRef.current !== undefined) clearTimeout(timeoutRef.current);
+    onLoad && onLoad();
+  };
+  const handleError = (e: any) => {
+    if (timeoutRef.current !== undefined) clearTimeout(timeoutRef.current);
+    // Try to extract error message from event
+    let errMsg = 'Failed to load image';
+    if (e && typeof e === 'object') {
+      if (e.nativeEvent && e.nativeEvent.error) errMsg = e.nativeEvent.error;
+      else if (e.type === 'error') errMsg = 'Image failed to load (event)';
+    }
+    onError && onError(errMsg);
+  };
+  // For <img> (web), inject only valid props (onload/onerror, cast as any)
+  if (Platform.OS === 'web' && children.type === 'img') {
+    return React.cloneElement(children as React.ReactElement<HTMLImageElement>, {
+      onload: handleLoad as any,
+      onerror: handleError as any,
+    });
+  }
+  // For <Image> (native), inject only valid props
+  if (Platform.OS !== 'web' && typeof children.type === 'function' && children.type.name === 'Image') {
+    return React.cloneElement(children, {
+      onLoad: handleLoad,
+      onError: handleError,
+    } as any);
+  }
+  return children;
 }
 
 const styles = StyleSheet.create({
