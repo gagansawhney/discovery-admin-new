@@ -5,6 +5,7 @@ const cors = require('cors')({ origin: true, credentials: true });
 const fetch = require('node-fetch');
 const { v4: uuidv4 } = require('uuid');
 const OpenAI = require('openai');
+const { FieldValue } = require('@google-cloud/firestore');
 
 // Helper function to process a single accepted post
 async function processAcceptedPost(post, originalIndex, results) {
@@ -302,7 +303,7 @@ async function saveEventToFirestore(eventData, post) {
       logger.error('Error generating embedding', { error: embedErr.message, searchText: eventData.searchText });
       throw new Error('Failed to generate embedding: ' + embedErr.message);
     }
-    eventData.embedding = embedding;
+    eventData.embedding = FieldValue.vector(embedding);
 
     // Add source information
     const eventWithSource = {

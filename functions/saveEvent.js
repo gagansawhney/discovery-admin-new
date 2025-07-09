@@ -4,6 +4,7 @@ const cors = require('cors');
 const logger = require('firebase-functions/logger');
 const { externalDb } = require('./firebase');
 const OpenAI = require('openai');
+const { FieldValue } = require('@google-cloud/firestore');
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
@@ -40,7 +41,7 @@ app.post('/', async (req, res) => {
       logger.error('Error generating embedding', { error: embedErr.message, searchText: eventData.searchText });
       return res.status(500).json({ success: false, error: 'Failed to generate embedding', details: embedErr.message });
     }
-    eventData.embedding = embedding;
+    eventData.embedding = FieldValue.vector(embedding);
 
     await externalDb.collection('events').doc(eventData.id).set(eventData, { merge: true });
 
