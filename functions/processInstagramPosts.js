@@ -16,6 +16,8 @@ async function processAcceptedPost(post, originalIndex, results) {
     hasImages: !!post.images
   });
 
+  let removeFromQueue = false;
+
   try {
     // Step 1: Get the best image URL
     const imageUrl = getBestImageUrl(post);
@@ -56,11 +58,61 @@ async function processAcceptedPost(post, originalIndex, results) {
       throw new Error('Failed to extract event information');
     }
 
+    // Step 4.1: Canonicalize venue using checkVen
+    if (eventData.venue && eventData.venue.name) {
+      try {
+        const checkVenResp = await fetch('https://us-central1-discovery-admin-f87ce.cloudfunctions.net/checkVen', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ venueName: eventData.venue.name })
+        });
+        const checkVenData = await checkVenResp.json();
+        logger.info('Venue validation result:', checkVenData);
+        logger.info('Event data before canonicalization:', eventData);
+        if (checkVenData.success && checkVenData.venue) {
+          // Overwrite the entire venue object with canonical info
+          eventData.venue = { ...checkVenData.venue };
+        } else {
+          throw new Error('Venue not found in database');
+        }
+        logger.info('Event data after canonicalization:', eventData);
+      } catch (err) {
+        throw new Error('Venue canonicalization failed: ' + (err.message || err));
+      }
+    }
+
+    // Step 4.2: Normalize event.date.start to date-only for duplicate detection and saving
+    if (eventData.date && eventData.date.start) {
+      eventData.date.start = normalizeToDateOnly(eventData.date.start);
+    }
+
     logger.info(`--- processAcceptedPost: Step 4 complete - Event data extracted ---`, {
       postId,
       eventName: eventData.name,
       eventDate: eventData.date?.start
     });
+
+    // Step 4.5: Duplicate detection by venue and date (date-only)
+    const isDuplicate = await checkForDuplicateEventByVenueAndDate(eventData);
+    if (isDuplicate) {
+      logger.info(`--- processAcceptedPost: Duplicate event detected, not saving ---`, {
+        postId,
+        eventName: eventData.name,
+        eventDate: eventData.date?.start,
+        venueName: eventData.venue?.name
+      });
+      results.errors.push({
+        postIndex: originalIndex,
+        postId,
+        duplicate: true,
+        eventName: eventData.name,
+        eventDate: eventData.date?.start,
+        venueName: eventData.venue?.name,
+        error: `Duplicate event found for venue '${eventData.venue?.name}' on date '${eventData.date?.start}'. Not saved.`
+      });
+      removeFromQueue = true; // Remove duplicates from queue too
+      return { success: false, duplicate: true };
+    }
 
     // Step 5: Save event to Firestore
     const eventId = await saveEventToFirestore(eventData, post);
@@ -73,13 +125,7 @@ async function processAcceptedPost(post, originalIndex, results) {
       eventId
     });
 
-    // Step 6: Remove post from apifyResults
-    await removePostFromResults(post);
-
-    logger.info(`--- processAcceptedPost: Step 6 complete - Post removed from results ---`, {
-      postId
-    });
-
+    removeFromQueue = true;
     // Update results
     results.successful++;
     results.processed++;
@@ -104,8 +150,16 @@ async function processAcceptedPost(post, originalIndex, results) {
       error: error.message
     });
     results.failed++;
-
+    // Only remove from queue if duplicate or canonicalization error
+    if (error.message && (error.message.includes('Duplicate event') || error.message.includes('Venue not found'))) {
+      removeFromQueue = true;
+    }
     return { success: false, error: error.message };
+  } finally {
+    if (removeFromQueue) {
+      await removePostFromResults(post);
+      logger.info(`--- processAcceptedPost: Post removed from results (finally block) ---`, { postId });
+    }
   }
 }
 
@@ -291,6 +345,30 @@ async function removePostFromResults(post) {
   }
 }
 
+// Helper function to check for duplicate event by venue and date (date-only)
+async function checkForDuplicateEventByVenueAndDate(event) {
+  try {
+    if (!event.venue?.name || !event.date?.start) return false;
+    const dateOnly = normalizeToDateOnly(event.date.start);
+    const snapshot = await externalDb.collection('events')
+      .where('venue.name', '==', event.venue.name)
+      .where('date.start', '==', dateOnly)
+      .limit(1)
+      .get();
+    return !snapshot.empty;
+  } catch (error) {
+    logger.error('Error checking for duplicate event by venue and date', { error: error.message });
+    return false;
+  }
+}
+
+// Helper to normalize ISO date string to YYYY-MM-DD
+function normalizeToDateOnly(isoString) {
+  if (!isoString) return null;
+  // Handles both 'YYYY-MM-DD' and 'YYYY-MM-DDTHH:mm:ssZ'
+  return isoString.split('T')[0];
+}
+
 exports.processInstagramPosts = functions.https.onRequest({ 
   invoker: 'public', 
   secrets: ["OPENAI_API_KEY"], 
@@ -315,9 +393,18 @@ exports.processInstagramPosts = functions.https.onRequest({
     return;
   }
 
+  // Check for SSE (Server-Sent Events) request
+  const isSSE = req.headers.accept && req.headers.accept.includes('text/event-stream');
+  if (isSSE) {
+    // SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders && res.flushHeaders();
+  }
+
   try {
     const { posts, decisions } = req.body;
-    
     logger.info('--- processInstagramPosts: Request received ---', {
       method: req.method,
       headers: req.headers,
@@ -327,7 +414,6 @@ exports.processInstagramPosts = functions.https.onRequest({
       postsLength: posts?.length,
       decisionsLength: decisions?.length
     });
-    
     if (!posts || !decisions || !Array.isArray(posts) || !Array.isArray(decisions)) {
       logger.error('--- processInstagramPosts: Invalid request body ---', {
         posts: posts,
@@ -335,21 +421,14 @@ exports.processInstagramPosts = functions.https.onRequest({
         postsIsArray: Array.isArray(posts),
         decisionsIsArray: Array.isArray(decisions)
       });
-      res.status(400).json({ error: 'Invalid request body. Expected posts and decisions arrays.' });
+      if (isSSE) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: 'Invalid request body. Expected posts and decisions arrays.' })}\n\n`);
+        res.end();
+      } else {
+        res.status(400).json({ error: 'Invalid request body. Expected posts and decisions arrays.' });
+      }
       return;
     }
-
-    logger.info('--- processInstagramPosts: Processing posts ---', { 
-      totalPosts: posts.length, 
-      decisionsLength: decisions.length,
-      decisionsSample: decisions.slice(0, 5),
-      firstPostSample: posts[0] ? {
-        id: posts[0].id,
-        shortcode: posts[0].shortcode,
-        displayUrl: posts[0].displayUrl,
-        caption: posts[0].caption?.substring(0, 100)
-      } : null
-    });
 
     const results = {
       processed: 0,
@@ -362,108 +441,94 @@ exports.processInstagramPosts = functions.https.onRequest({
     // Separate rejected and accepted posts
     const rejectedPosts = [];
     const acceptedPosts = [];
-    
     for (let i = 0; i < posts.length; i++) {
       const post = posts[i];
       const decision = decisions[i];
-      
       if (decision === 'reject') {
         rejectedPosts.push({ post, index: i });
       } else if (decision === 'accept') {
         acceptedPosts.push({ post, index: i });
       }
     }
-    
-    logger.info('--- processInstagramPosts: Post separation complete ---', {
-      totalPosts: posts.length,
-      rejectedCount: rejectedPosts.length,
-      acceptedCount: acceptedPosts.length
-    });
 
     // Process rejected posts (delete from Firestore)
-    logger.info('--- processInstagramPosts: Starting rejected posts processing ---');
     for (const { post, index } of rejectedPosts) {
       try {
-        logger.info(`--- Processing rejected post ${index + 1}/${posts.length} ---`, {
-          postId: post.id || post.shortcode,
-          postIndex: index
-        });
-        
         // Remove rejected post from the results array in apifyResults collection
         const apifyResultsQuery = await externalDb.collection('apifyResults').get();
         let postRemoved = false;
-        
         for (const doc of apifyResultsQuery.docs) {
           const data = doc.data();
-          
           if (data.results && Array.isArray(data.results)) {
             const postIndex = data.results.findIndex(result => 
               result.id === post.id || result.shortcode === post.shortcode
             );
-            
             if (postIndex !== -1) {
               data.results.splice(postIndex, 1);
               await doc.ref.update({ results: data.results });
-              logger.info(`--- Successfully removed rejected post ${index + 1} from results array ---`);
               postRemoved = true;
               break;
             }
           }
         }
-        
-        if (!postRemoved) {
-          logger.info(`--- Rejected post ${index + 1} not found in any apifyResults document ---`);
-        }
-        
         results.deleted++;
+        if (isSSE) {
+          res.write(`event: rejected\ndata: ${JSON.stringify({ postIndex: index, postId: post.id || post.shortcode })}\n\n`);
+        }
       } catch (error) {
-        logger.error(`--- Error processing rejected post ${index + 1} ---`, error);
         results.errors.push({
           postIndex: index,
           postId: post.id || post.shortcode,
           error: `Failed to delete: ${error.message}`
         });
         results.failed++;
+        if (isSSE) {
+          res.write(`event: error\ndata: ${JSON.stringify({ postIndex: index, postId: post.id || post.shortcode, error: error.message })}\n\n`);
+        }
       }
     }
 
     // Process accepted posts in batches (extract and save events)
-    logger.info('--- processInstagramPosts: Starting accepted posts processing ---');
     const batchSize = 5;
-    
     for (let i = 0; i < acceptedPosts.length; i += batchSize) {
       const batch = acceptedPosts.slice(i, i + batchSize);
-      logger.info(`--- Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(acceptedPosts.length / batchSize)} ---`, {
-        batchStart: i + 1,
-        batchEnd: Math.min(i + batchSize, acceptedPosts.length),
-        batchSize: batch.length
-      });
-      
       // Process batch in parallel
       const batchPromises = batch.map(async ({ post, index }) => {
-        return await processAcceptedPost(post, index, results);
+        const result = await processAcceptedPost(post, index, results);
+        if (isSSE) {
+          res.write(`event: processed\ndata: ${JSON.stringify({ postIndex: index, postId: post.id || post.shortcode, ...result })}\n\n`);
+        }
+        return result;
       });
-      
       try {
         await Promise.all(batchPromises);
-        logger.info(`--- Batch ${Math.floor(i / batchSize) + 1} completed successfully ---`);
       } catch (error) {
-        logger.error(`--- Error in batch ${Math.floor(i / batchSize) + 1} ---`, error);
+        if (isSSE) {
+          res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
+        }
       }
     }
 
-    logger.info('--- processInstagramPosts: Processing completed ---', results);
-    res.status(200).json({ 
-      success: true, 
-      results 
-    });
-
+    if (isSSE) {
+      res.write(`event: summary\ndata: ${JSON.stringify(results)}\n\n`);
+      res.end();
+    } else {
+      res.status(200).json({ 
+        success: true, 
+        results 
+      });
+    }
   } catch (error) {
     logger.error('--- processInstagramPosts: Function error ---', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Processing failed', 
-      details: error.message 
-    });
+    if (isSSE) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
+      res.end();
+    } else {
+      res.status(500).json({ 
+        success: false, 
+        error: 'Processing failed', 
+        details: error.message 
+      });
+    }
   }
 }); 
