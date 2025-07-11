@@ -72,6 +72,7 @@ export default function ScraperScreen() {
   const [isProcessingPostsLoading, setIsProcessingPostsLoading] = useState(false);
   const [liveProcessingStatus, setLiveProcessingStatus] = useState<any[]>([]); // For SSE events
   const [liveSummary, setLiveSummary] = useState<any>(null);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
 
   const fetchApifyRuns = useCallback(async () => {
     setIsLoadingRuns(true);
@@ -178,6 +179,7 @@ export default function ScraperScreen() {
     }
 
     if (shouldDelete) {
+      setDeletingRunId(runId);
       try {
         const response = await fetch(DELETE_APIFY_RUN_URL, {
           method: 'POST',
@@ -201,6 +203,8 @@ export default function ScraperScreen() {
         }
       } catch (e) {
         Alert.alert('Error', 'Failed to delete run.');
+      } finally {
+        setDeletingRunId(null);
       }
     }
   };
@@ -368,9 +372,17 @@ export default function ScraperScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modalVisible, selectedRun]);
 
+  // Filter out error/no-data entries from scrapedData before using it
+  const filteredScrapedData = scrapedData.filter(
+    post => !post.error && (post.id || post.shortcode)
+  );
+
+  // Map from filtered index to originalIndex for backend
+  const filteredOriginalIndexes = filteredScrapedData.map(post => post.originalIndex);
+
   // Helper functions for post navigation
   const goToNextPost = () => {
-    if (currentPostIndex < scrapedData.length - 1) {
+    if (currentPostIndex < filteredScrapedData.length - 1) {
       setCurrentPostIndex(currentPostIndex + 1);
       setCurrentImageIndex(0);
     }
@@ -384,7 +396,7 @@ export default function ScraperScreen() {
   };
 
   const goToNextImage = () => {
-    const currentPost = scrapedData[currentPostIndex];
+    const currentPost = filteredScrapedData[currentPostIndex];
     const images = getPostImages(currentPost);
     if (currentImageIndex < images.length - 1) {
       setCurrentImageIndex(currentImageIndex + 1);
@@ -413,7 +425,7 @@ export default function ScraperScreen() {
     setIsPostDecisionLoading(true);
     setPostDecisions(prev => {
       const updated = { ...prev, [currentPostIndex]: decision };
-      if (currentPostIndex < scrapedData.length - 1) {
+      if (currentPostIndex < filteredScrapedData.length - 1) {
         setTimeout(() => {
           setCurrentPostIndex(currentPostIndex + 1);
           setIsPostDecisionLoading(false);
@@ -427,9 +439,9 @@ export default function ScraperScreen() {
 
   const handleProcessPosts = async () => {
     console.log('🎯 handleProcessPosts function called!');
-    const acceptedPosts = scrapedData.filter((_, index) => postDecisions[index] === 'accept');
-    const rejectedPosts = scrapedData.filter((_, index) => postDecisions[index] === 'reject');
-    const unprocessedPosts = scrapedData.filter((_, index) => !postDecisions[index]);
+    const acceptedPosts = filteredScrapedData.filter((_, index) => postDecisions[index] === 'accept');
+    const rejectedPosts = filteredScrapedData.filter((_, index) => postDecisions[index] === 'reject');
+    const unprocessedPosts = filteredScrapedData.filter((_, index) => !postDecisions[index]);
     const message = `Accepted: ${acceptedPosts.length}\nRejected: ${rejectedPosts.length}\nUnprocessed: ${unprocessedPosts.length}\n\nWould you like to process the accepted posts?`;
     let shouldProcess = false;
     if (Platform.OS === 'web') {
@@ -443,10 +455,12 @@ export default function ScraperScreen() {
     setLiveSummary(null);
     try {
       // Prepare decisions array in order of scrapedData
-      const decisionsArr = scrapedData.map((_, idx) =>
+      const decisionsArr = filteredScrapedData.map((_, idx) =>
         postDecisions[idx] === 'accept' ? 'accept' : postDecisions[idx] === 'reject' ? 'reject' : null
       );
-      const requestPayload = { posts: scrapedData, decisions: decisionsArr };
+      // Send originalIndex with each post
+      const postsWithIndex = filteredScrapedData.map((post, idx) => ({ ...post, originalIndex: post.originalIndex }));
+      const requestPayload = { posts: postsWithIndex, decisions: decisionsArr };
       const backendUrl = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/processInstagramPosts';
       if (Platform.OS === 'web') {
         // Web: Use fetch/POST, no SSE
@@ -507,7 +521,7 @@ export default function ScraperScreen() {
       // Get failed post indexes
       const failedIndexes = (liveSummary.errors || []).map((e: { postIndex: number }) => e.postIndex);
       // Keep posts that failed OR were not processed (no decision)
-      const remainingPosts = scrapedData.filter((_, idx) =>
+      const remainingPosts = filteredScrapedData.filter((_, idx) =>
         failedIndexes.includes(idx) || !postDecisions[idx]
       );
       // Store error messages for failed posts
@@ -674,8 +688,13 @@ export default function ScraperScreen() {
                 <TouchableOpacity
                   style={styles.deleteButton}
                   onPress={() => handleDeleteApifyRun(run.runId)}
+                  disabled={deletingRunId === run.runId}
                 >
-                  <Ionicons name="trash-outline" size={20} color="#ff4444" />
+                  {deletingRunId === run.runId ? (
+                    <ActivityIndicator size="small" color="#ff4444" />
+                  ) : (
+                    <Ionicons name="trash-outline" size={20} color="#ff4444" />
+                  )}
                 </TouchableOpacity>
               </View>
             ))
@@ -720,11 +739,11 @@ export default function ScraperScreen() {
                     <ActivityIndicator size="large" color="#007AFF" />
                     <ThemedText style={{ marginTop: 10 }}>Loading scraped data...</ThemedText>
                   </View>
-                ) : scrapedData.length > 0 ? (
+                ) : filteredScrapedData.length > 0 ? (
                   <View style={{ flex: 1 }}>
                     {/* Post Counter */}
                     <ThemedText style={{ textAlign: 'center', marginBottom: 10, fontWeight: 'bold' }}>
-                      Post {currentPostIndex + 1} of {scrapedData.length}
+                      Post {currentPostIndex + 1} of {filteredScrapedData.length}
                     </ThemedText>
 
                     {/* Post Navigation Arrows */}
@@ -739,17 +758,17 @@ export default function ScraperScreen() {
                       
                       <TouchableOpacity
                         onPress={goToNextPost}
-                        disabled={currentPostIndex === scrapedData.length - 1}
-                        style={[styles.navButton, currentPostIndex === scrapedData.length - 1 && styles.disabledButton]}
+                        disabled={currentPostIndex === filteredScrapedData.length - 1}
+                        style={[styles.navButton, currentPostIndex === filteredScrapedData.length - 1 && styles.disabledButton]}
                       >
-                        <Ionicons name="chevron-forward" size={24} color={currentPostIndex === scrapedData.length - 1 ? "#ccc" : "#007AFF"} />
+                        <Ionicons name="chevron-forward" size={24} color={currentPostIndex === filteredScrapedData.length - 1 ? "#ccc" : "#007AFF"} />
                       </TouchableOpacity>
                     </View>
 
                     {/* Current Post Content */}
                     <ScrollView style={{ flex: 1, marginBottom: 10 }}>
                       {(() => {
-                        const currentPost = scrapedData[currentPostIndex];
+                        const currentPost = filteredScrapedData[currentPostIndex];
                         const images = getPostImages(currentPost);
                         
                         return (
@@ -781,7 +800,7 @@ export default function ScraperScreen() {
                                           src={`https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`}
                                           alt="Instagram post"
                                           style={styles.image}
-                                          onError={(e) => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: e?.message || 'Failed to load image' }))}
+                                          onError={() => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: 'Failed to load image' }))}
                                           onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
                                         />
                                       ) : (
@@ -850,6 +869,13 @@ export default function ScraperScreen() {
                                 )}
                               </View>
                             )}
+
+                            {/* Show post id for debugging */}
+                            <View style={{ alignItems: 'center', marginVertical: 6 }}>
+                              <ThemedText style={{ color: '#888', fontSize: 14 }}>
+                                post id: {currentPost.id || currentPost.shortcode || 'N/A'}
+                              </ThemedText>
+                            </View>
 
                             {/* Post Text */}
                             <View style={styles.postTextContainer}>

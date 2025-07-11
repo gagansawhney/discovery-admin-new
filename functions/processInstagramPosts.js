@@ -15,105 +15,80 @@ async function processAcceptedPost(post, originalIndex, results) {
     originalIndex,
     hasDisplayUrl: !!post.displayUrl,
     hasThumbnailUrl: !!post.thumbnailUrl,
-    hasImages: !!post.images
+    hasImages: !!post.images,
+    isVideo: !!post.isVideo,
+    hasVideoUrl: !!post.videoUrl
   });
+
+  // Skip posts older than 25 hours
+  const POST_MAX_AGE_HOURS = 25;
+  const postDate = post.timestamp || post.date;
+  if (postDate) {
+    const postTime = new Date(postDate).getTime();
+    const now = Date.now();
+    const ageHours = (now - postTime) / (1000 * 60 * 60);
+    if (ageHours > POST_MAX_AGE_HOURS) {
+      logger.info(`Skipping post ${postId}: older than ${POST_MAX_AGE_HOURS} hours (${ageHours.toFixed(2)}h old)`);
+      results.errors.push({
+        postIndex: originalIndex,
+        postId,
+        skipped: true,
+        reason: `Post too old (${ageHours.toFixed(2)}h)`
+      });
+      results.failed++;
+      // Optionally remove from queue
+      await removePostFromResults(post);
+      logger.info(`--- processAcceptedPost: Old post removed from results (age filter) ---`, { postId });
+      return { success: false, skipped: true, reason: 'Post too old' };
+    }
+  }
 
   let removeFromQueue = false;
 
   try {
-    // Step 1: Get the best image URL
-    const imageUrl = getBestImageUrl(post);
-    if (!imageUrl) {
-      throw new Error('No valid image URL found');
-    }
-
-    logger.info(`--- processAcceptedPost: Step 1 complete - Image URL found ---`, {
-      postId,
-      imageUrl: imageUrl.substring(0, 100) + '...'
-    });
-
-    // Step 2: Download image from Instagram
-    const imageBuffer = await downloadImage(imageUrl);
-    if (!imageBuffer) {
-      throw new Error('Failed to download image');
-    }
-
-    logger.info(`--- processAcceptedPost: Step 2 complete - Image downloaded ---`, {
-      postId,
-      imageSize: imageBuffer.length
-    });
-
-    // Step 3: Upload to Firebase Storage
-    const storagePath = await uploadToStorage(imageBuffer, postId);
-    if (!storagePath) {
-      throw new Error('Failed to upload image to storage');
-    }
-
-    logger.info(`--- processAcceptedPost: Step 3 complete - Image uploaded to storage ---`, {
-      postId,
-      storagePath
-    });
-
-    // Step 4: Extract event information using OpenAI
-    const eventData = await extractEventInfo(storagePath, post);
-    if (!eventData) {
-      throw new Error('Failed to extract event information');
-    }
-
-    // Step 4.1: Canonicalize venue using checkVen
-    if (eventData.venue && eventData.venue.name) {
-      try {
-        const checkVenResp = await fetch('https://us-central1-discovery-admin-f87ce.cloudfunctions.net/checkVen', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ venueName: eventData.venue.name })
-        });
-        const checkVenData = await checkVenResp.json();
-        logger.info('Venue validation result:', checkVenData);
-        logger.info('Event data before canonicalization:', eventData);
-        if (checkVenData.success && checkVenData.venue) {
-          // Overwrite the entire venue object with canonical info
-          eventData.venue = { ...checkVenData.venue };
-        } else {
-          throw new Error('Venue not found in database');
-        }
-        logger.info('Event data after canonicalization:', eventData);
-      } catch (err) {
-        throw new Error('Venue canonicalization failed: ' + (err.message || err));
+    let storagePath, imageForExtraction, videoPath = null;
+    if (post.isVideo && post.videoUrl) {
+      // Download and upload video
+      const videoBuffer = await downloadVideo(post.videoUrl);
+      storagePath = await uploadVideoToStorage(videoBuffer, postId);
+      videoPath = storagePath;
+      // Use thumbnail for event extraction if available
+      imageForExtraction = post.thumbnailUrl || null;
+      if (!imageForExtraction) {
+        throw new Error('Video post has no thumbnail for event extraction');
       }
+    } else {
+      // Existing image logic
+      const imageUrl = getBestImageUrl(post);
+      if (!imageUrl) throw new Error('No valid image URL found');
+      const imageBuffer = await downloadImage(imageUrl);
+      storagePath = await uploadToStorage(imageBuffer, postId);
+      imageForExtraction = imageUrl;
     }
 
-    // Step 4.2: Normalize event.date.start to date-only for duplicate detection and saving
-    if (eventData.date && eventData.date.start) {
-      eventData.date.start = normalizeToDateOnly(eventData.date.start);
-    }
-
-    logger.info(`--- processAcceptedPost: Step 4 complete - Event data extracted ---`, {
+    logger.info(`--- processAcceptedPost: Media uploaded to storage ---`, {
       postId,
-      eventName: eventData.name,
-      eventDate: eventData.date?.start
+      storagePath,
+      videoPath,
+      imageForExtraction
     });
 
-    // Step 4.5: Duplicate detection by venue and date (date-only)
-    const isDuplicate = await checkForDuplicateEventByVenueAndDate(eventData);
-    if (isDuplicate) {
-      logger.info(`--- processAcceptedPost: Duplicate event detected, not saving ---`, {
-        postId,
-        eventName: eventData.name,
-        eventDate: eventData.date?.start,
-        venueName: eventData.venue?.name
-      });
-      results.errors.push({
-        postIndex: originalIndex,
-        postId,
-        duplicate: true,
-        eventName: eventData.name,
-        eventDate: eventData.date?.start,
-        venueName: eventData.venue?.name,
-        error: `Duplicate event found for venue '${eventData.venue?.name}' on date '${eventData.date?.start}'. Not saved.`
-      });
-      removeFromQueue = true; // Remove duplicates from queue too
-      return { success: false, duplicate: true };
+    // Step 4: Extract event information using OpenAI (use imageForExtraction)
+    let eventData = null;
+    if (imageForExtraction) {
+      // If imageForExtraction is a URL, download and upload to storage for extraction
+      let extractionStoragePath = storagePath;
+      if (post.isVideo && post.videoUrl && post.thumbnailUrl) {
+        // Download and upload thumbnail to storage for extraction
+        const thumbBuffer = await downloadImage(post.thumbnailUrl);
+        extractionStoragePath = await uploadToStorage(thumbBuffer, postId + '-thumb');
+      }
+      eventData = await extractEventInfo(extractionStoragePath, post);
+      if (!eventData) {
+        throw new Error('Failed to extract event information');
+      }
+    } else {
+      throw new Error('No image available for event extraction');
     }
 
     // Step 5: Save event to Firestore
@@ -131,6 +106,7 @@ async function processAcceptedPost(post, originalIndex, results) {
     // Update results
     results.successful++;
     results.processed++;
+    logger.info(`--- processAcceptedPost: Counted as successful. Processed: ${results.processed}, Successful: ${results.successful}`);
 
     logger.info(`--- processAcceptedPost: SUCCESS - Post ${originalIndex + 1} fully processed ---`, {
       postId,
@@ -152,10 +128,8 @@ async function processAcceptedPost(post, originalIndex, results) {
       error: error.message
     });
     results.failed++;
-    // Only remove from queue if duplicate or canonicalization error
-    if (error.message && (error.message.includes('Duplicate event') || error.message.includes('Venue not found'))) {
-      removeFromQueue = true;
-    }
+    // Always remove from queue for failed/errored posts
+    removeFromQueue = true;
     return { success: false, error: error.message };
   } finally {
     if (removeFromQueue) {
@@ -338,36 +312,49 @@ async function saveEventToFirestore(eventData, post) {
 // Helper function to remove post from apifyResults
 async function removePostFromResults(post) {
   try {
-    logger.info(`--- removePostFromResults: Starting removal ---`, { postId: post.id || post.shortcode });
-    
+    logger.info(`--- removePostFromResults: Starting removal (by id only) ---`, { postId: post.id });
+    if (!post.id) {
+      logger.error('--- removePostFromResults: No id provided in post, cannot remove ---', { post });
+      return false;
+    }
+    // Find the correct apifyResults document (assume only one for now)
     const apifyResultsQuery = await externalDb.collection('apifyResults').get();
-    let postRemoved = false;
-    
-    for (const doc of apifyResultsQuery.docs) {
-      const data = doc.data();
-      
-      if (data.results && Array.isArray(data.results)) {
-        const postIndex = data.results.findIndex(result => 
-          result.id === post.id || result.shortcode === post.shortcode
-        );
-        
-        if (postIndex !== -1) {
-          data.results.splice(postIndex, 1);
-          await doc.ref.update({ results: data.results });
-          logger.info(`--- removePostFromResults: Post removed successfully ---`, { postId: post.id || post.shortcode });
-          postRemoved = true;
-          break;
-        }
+    if (apifyResultsQuery.empty) {
+      logger.info('--- removePostFromResults: No apifyResults documents found ---');
+      return false;
+    }
+    const doc = apifyResultsQuery.docs[0];
+    const docRef = doc.ref;
+    // Use a Firestore transaction for atomic update
+    await externalDb.runTransaction(async (transaction) => {
+      const docSnap = await transaction.get(docRef);
+      const data = docSnap.data();
+      if (!data || !Array.isArray(data.results)) {
+        logger.info('--- removePostFromResults: No results array in document ---', { docId: docRef.id });
+        return;
       }
-    }
-    
-    if (!postRemoved) {
-      logger.info(`--- removePostFromResults: Post not found in any apifyResults document ---`, { postId: post.id || post.shortcode });
-    }
-    
-    return postRemoved;
+      const postIndex = data.results.findIndex(result => result.id === post.id);
+      logger.info('--- removePostFromResults: Removing by id ---', { docId: docRef.id, postId: post.id, foundIndex: postIndex });
+      if (postIndex !== -1) {
+        data.results.splice(postIndex, 1);
+        transaction.update(docRef, { results: data.results });
+        logger.info('--- removePostFromResults: Transaction post removed ---', { docId: docRef.id, newLength: data.results.length });
+      } else {
+        logger.info('--- removePostFromResults: Post not found in results ---', { docId: docRef.id, postId: post.id });
+      }
+    });
+    // Verify removal
+    const updatedDoc = await docRef.get();
+    const updatedData = updatedDoc.data();
+    const stillPresent = updatedData.results.some(result => result.id === post.id);
+    logger.info('--- removePostFromResults: Post-update verification (transaction) ---', {
+      docId: docRef.id,
+      resultsLength: updatedData.results.length,
+      postStillPresent: stillPresent
+    });
+    return true;
   } catch (error) {
-    logger.error(`--- removePostFromResults: Removal failed ---`, { postId: post.id || post.shortcode, error: error.message });
+    logger.error('--- removePostFromResults: Transaction removal failed ---', { postId: post.id, error: error.message, stack: error.stack });
     throw error;
   }
 }
@@ -386,6 +373,47 @@ async function checkForDuplicateEventByVenueAndDate(event) {
   } catch (error) {
     logger.error('Error checking for duplicate event by venue and date', { error: error.message });
     return false;
+  }
+}
+
+// Helper function to download video from Instagram
+async function downloadVideo(videoUrl) {
+  try {
+    logger.info(`--- downloadVideo: Starting download ---`, { videoUrl: videoUrl.substring(0, 100) + '...' });
+    const response = await fetch(videoUrl);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    const buffer = await response.buffer();
+    logger.info(`--- downloadVideo: Download successful ---`, { size: buffer.length });
+    return buffer;
+  } catch (error) {
+    logger.error(`--- downloadVideo: Download failed ---`, { videoUrl, error: error.message });
+    throw error;
+  }
+}
+
+// Helper function to upload video to Firebase Storage
+async function uploadVideoToStorage(videoBuffer, postId) {
+  try {
+    const fileName = `instagram-posts/${postId}-${Date.now()}.mp4`;
+    const file = bucket.file(fileName);
+    logger.info(`--- uploadVideoToStorage: Starting upload ---`, { fileName });
+    await file.save(videoBuffer, {
+      metadata: {
+        contentType: 'video/mp4',
+        metadata: {
+          source: 'instagram',
+          postId: postId,
+          uploadedAt: new Date().toISOString()
+        }
+      }
+    });
+    logger.info(`--- uploadVideoToStorage: Upload successful ---`, { fileName });
+    return fileName;
+  } catch (error) {
+    logger.error(`--- uploadVideoToStorage: Upload failed ---`, { postId, error: error.message });
+    throw error;
   }
 }
 
@@ -420,15 +448,7 @@ exports.processInstagramPosts = functions.https.onRequest({
     return;
   }
 
-  // Check for SSE (Server-Sent Events) request
-  const isSSE = req.headers.accept && req.headers.accept.includes('text/event-stream');
-  if (isSSE) {
-    // SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders && res.flushHeaders();
-  }
+  // SSE/live update support removed; always respond with summary at end
 
   try {
     const { posts, decisions } = req.body;
@@ -448,13 +468,25 @@ exports.processInstagramPosts = functions.https.onRequest({
         postsIsArray: Array.isArray(posts),
         decisionsIsArray: Array.isArray(decisions)
       });
-      if (isSSE) {
-        res.write(`event: error\ndata: ${JSON.stringify({ error: 'Invalid request body. Expected posts and decisions arrays.' })}\n\n`);
-        res.end();
-      } else {
-        res.status(400).json({ error: 'Invalid request body. Expected posts and decisions arrays.' });
-      }
+      res.status(400).json({ error: 'Invalid request body. Expected posts and decisions arrays.' });
       return;
+    }
+
+    // Filter out error/no-data entries
+    const validIndexes = posts.map((post, i) => (!post.error && (post.id || post.shortcode)) ? i : null).filter(i => i !== null);
+    const validPosts = validIndexes.map(i => posts[i]);
+    const validDecisions = validIndexes.map(i => decisions[i]);
+    logger.info(`--- processInstagramPosts: Filtering posts ---`, {
+      originalCount: posts.length,
+      validCount: validPosts.length
+    });
+    posts.forEach((post, i) => {
+      if (post.error || (!post.id && !post.shortcode)) {
+        logger.warn(`Skipping post at index ${i}: error=${post.error}, id=${post.id}, shortcode=${post.shortcode}`);
+      }
+    });
+    if (validPosts.length === 0) {
+      logger.warn('No valid posts to process after filtering.');
     }
 
     const results = {
@@ -468,9 +500,9 @@ exports.processInstagramPosts = functions.https.onRequest({
     // Separate rejected and accepted posts
     const rejectedPosts = [];
     const acceptedPosts = [];
-    for (let i = 0; i < posts.length; i++) {
-      const post = posts[i];
-      const decision = decisions[i];
+    for (let i = 0; i < validPosts.length; i++) {
+      const post = validPosts[i];
+      const decision = validDecisions[i];
       if (decision === 'reject') {
         rejectedPosts.push({ post, index: i });
       } else if (decision === 'accept') {
@@ -481,15 +513,17 @@ exports.processInstagramPosts = functions.https.onRequest({
     // Process rejected posts (delete from Firestore)
     for (const { post, index } of rejectedPosts) {
       try {
+        if (!post.id) {
+          logger.error('--- processInstagramPosts: Rejected post has no id, cannot remove ---', { post });
+          continue;
+        }
         // Remove rejected post from the results array in apifyResults collection
         const apifyResultsQuery = await externalDb.collection('apifyResults').get();
         let postRemoved = false;
         for (const doc of apifyResultsQuery.docs) {
           const data = doc.data();
           if (data.results && Array.isArray(data.results)) {
-            const postIndex = data.results.findIndex(result => 
-              result.id === post.id || result.shortcode === post.shortcode
-            );
+            const postIndex = data.results.findIndex(result => result.id === post.id);
             if (postIndex !== -1) {
               data.results.splice(postIndex, 1);
               await doc.ref.update({ results: data.results });
@@ -498,20 +532,17 @@ exports.processInstagramPosts = functions.https.onRequest({
             }
           }
         }
-        results.deleted++;
-        if (isSSE) {
-          res.write(`event: rejected\ndata: ${JSON.stringify({ postIndex: index, postId: post.id || post.shortcode })}\n\n`);
+        if (!postRemoved) {
+          logger.info('--- processInstagramPosts: Rejected post not found in results ---', { postId: post.id });
         }
+        results.deleted++;
       } catch (error) {
         results.errors.push({
           postIndex: index,
-          postId: post.id || post.shortcode,
+          postId: post.id,
           error: `Failed to delete: ${error.message}`
         });
         results.failed++;
-        if (isSSE) {
-          res.write(`event: error\ndata: ${JSON.stringify({ postIndex: index, postId: post.id || post.shortcode, error: error.message })}\n\n`);
-        }
       }
     }
 
@@ -522,40 +553,25 @@ exports.processInstagramPosts = functions.https.onRequest({
       // Process batch in parallel
       const batchPromises = batch.map(async ({ post, index }) => {
         const result = await processAcceptedPost(post, index, results);
-        if (isSSE) {
-          res.write(`event: processed\ndata: ${JSON.stringify({ postIndex: index, postId: post.id || post.shortcode, ...result })}\n\n`);
-        }
         return result;
       });
       try {
         await Promise.all(batchPromises);
       } catch (error) {
-        if (isSSE) {
-          res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
-        }
+        // Just log, don't stream errors
       }
     }
 
-    if (isSSE) {
-      res.write(`event: summary\ndata: ${JSON.stringify(results)}\n\n`);
-      res.end();
-    } else {
-      res.status(200).json({ 
-        success: true, 
-        results 
-      });
-    }
+    res.status(200).json({ 
+      success: true, 
+      results 
+    });
   } catch (error) {
     logger.error('--- processInstagramPosts: Function error ---', error);
-    if (isSSE) {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
-      res.end();
-    } else {
-      res.status(500).json({ 
-        success: false, 
-        error: 'Processing failed', 
-        details: error.message 
-      });
-    }
+    res.status(500).json({ 
+      success: false, 
+      error: 'Processing failed', 
+      details: error.message 
+    });
   }
 }); 

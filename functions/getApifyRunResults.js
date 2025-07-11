@@ -63,7 +63,21 @@ exports.getApifyRunResults = functions.https.onRequest({ invoker: 'public', secr
       const scrapedData = apifyResultsData.results;
       logger.info('--- getApifyRunResults: Returning data from Firestore ---', { itemCount: scrapedData.length });
 
-      res.status(200).json({ success: true, status: 'succeeded', data: scrapedData });
+      // Attach originalIndex to each post
+      const indexedData = scrapedData.map((post, idx) => ({ ...post, originalIndex: idx }));
+
+      // Filter out posts older than 25 hours
+      const POST_MAX_AGE_HOURS = 25;
+      const now = Date.now();
+      const filteredData = indexedData.filter(post => {
+        const postDate = post.timestamp || post.date;
+        if (!postDate) return true; // keep if no date
+        const ageHours = (now - new Date(postDate).getTime()) / (1000 * 60 * 60);
+        return ageHours <= POST_MAX_AGE_HOURS;
+      });
+      logger.info('--- getApifyRunResults: Filtered data ---', { filteredCount: filteredData.length });
+
+      res.status(200).json({ success: true, status: 'succeeded', data: filteredData });
 
     } catch (error) {
       logger.error('getApifyRunResults error', { error: error.message, stack: error.stack, fullError: error });
