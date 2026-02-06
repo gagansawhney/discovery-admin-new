@@ -2,6 +2,7 @@ const { generateUploadUrl } = require('./generateUploadUrl');
 const { extractFlyerInfo } = require('./extractFlyerInfo');
 const { logError } = require('./logError');
 const { startInstagramScraper } = require('./startInstagramScraper');
+const { startInstagramStoriesScraper } = require('./startInstagramStoriesScraper');
 
 
 
@@ -24,27 +25,37 @@ const { listUsernames } = require('./listUsernames');
 
 const { apifyWebhookHandler } = require('./apifyWebhookHandler');
 // const { pollApifyRuns, manualPollApifyRuns } = require('./pollApifyRuns');
-const { manualPollApifyRuns, deletePollingLog } = require('./pollApifyRuns');
+const { manualPollApifyRuns, deletePollingLog, scheduledPollApifyRuns } = require('./pollApifyRuns');
+const { scheduledClassifyRuns, manualAutoClassify } = require('./autoClassifyRuns');
+const { viewProcessedRuns } = require('./viewProcessedRuns');
 const { getApifyRunResults, proxyInstagramImage } = require('./getApifyRunResults');
 const { processInstagramPosts } = require('./processInstagramPosts');
 const { deleteApifyRun } = require('./deleteApifyRun');
+const { purgeUsernames } = require('./purgeUsernames');
+const { scheduleScrape, processScheduledScrapes } = require('./scheduleScrape');
+const { deleteSchedule } = require('./deleteSchedule');
+const { classifyApifyRun } = require('./classifyApifyRun');
+const { processClassifiedRun } = require('./processClassifiedRun');
+const { retryClassifyItem } = require('./retryClassifyItem');
+const { deleteClassificationItem } = require('./deleteClassificationItem');
 
 module.exports = {
   generateUploadUrl,
   extractFlyerInfo,
   logError,
   startInstagramScraper,
-  
+  startInstagramStoriesScraper,
+
   manageVenues,
   geocodeAddress,
   fetchVenueDetails,
   fetchEvents,
-  
+
   deleteEvent,
   saveEvent,
-  
+
   checkVen,
-  
+
   addUsername,
   deleteUsername,
   listUsernames,
@@ -52,9 +63,21 @@ module.exports = {
   apifyWebhookHandler,
   // pollApifyRuns,
   manualPollApifyRuns,
+  scheduledPollApifyRuns,
+  scheduledClassifyRuns,
+  manualAutoClassify,
+  viewProcessedRuns,
   deletePollingLog,
   getApifyRunResults,
   proxyInstagramImage,
   processInstagramPosts,
   deleteApifyRun,
+  purgeUsernames,
+  scheduleScrape,
+  processScheduledScrapes,
+  deleteSchedule,
+  classifyApifyRun,
+  processClassifiedRun,
+  retryClassifyItem,
+  deleteClassificationItem,
 };

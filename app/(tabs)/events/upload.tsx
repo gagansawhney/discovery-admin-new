@@ -1,11 +1,15 @@
-import { EventsTabNavigation } from '@/components/EventsTabNavigation';
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { Ionicons } from '@expo/vector-icons';
+import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate';
+import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
+import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
+import { Button as MUIButton } from '@mui/material';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import { useGlobalSearchParams } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import { Alert, Button, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 
 // Signed URL endpoints (deployed Cloud Functions / Cloud Run)
 // HTTP endpoints - 2nd Gen Cloud Functions
@@ -46,7 +50,10 @@ export default function UploadScreen() {
   const [successfulUploads, setSuccessfulUploads] = useState<SuccessfulUpload[]>([]);
   const [failedUploads, setFailedUploads] = useState<FailedUpload[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'oneTime' | 'recurring'>('oneTime');
+  const { tab: uploadTabParam } = useGlobalSearchParams<{ tab?: string }>();
+  const [activeTab, setActiveTab] = useState<'oneTime' | 'recurring'>(
+    uploadTabParam === 'recurring' ? 'recurring' : 'oneTime'
+  );
   
   // Recurring event state
   const [recurringImage, setRecurringImage] = useState<string | null>(null);
@@ -841,44 +848,29 @@ export default function UploadScreen() {
 
   return (
     <ScrollView style={styles.container}>
-      <EventsTabNavigation activeTab="upload" />
-      
-      {/* Tab Navigation */}
-      <View style={styles.tabContainer}>
-        <TouchableOpacity 
-          style={[styles.tab, activeTab === 'oneTime' && styles.activeTab]}
-          onPress={() => setActiveTab('oneTime')}
-        >
-          <ThemedText style={[styles.tabText, activeTab === 'oneTime' && styles.activeTabText]}>
-            One Time Events
-          </ThemedText>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.tab, activeTab === 'recurring' && styles.activeTab]}
-          onPress={() => setActiveTab('recurring')}
-        >
-          <ThemedText style={[styles.tabText, activeTab === 'recurring' && styles.activeTabText]}>
-            Recurring Events
-          </ThemedText>
-        </TouchableOpacity>
-      </View>
 
       {activeTab === 'oneTime' ? (
         // One Time Events Tab
         <>
           <ThemedView style={styles.header}>
             <ThemedText type="title">Batch Upload</ThemedText>
-            <View style={styles.headerButtons}>
-              <Button title="Add Images" onPress={pickImages} />
-              <Button 
-                title={isProcessing ? "Processing..." : "Process All"} 
-                onPress={processAllItems}
+            <View style={styles.headerButtonsInlineRight}>
+              <MUIButton variant="contained" size="small" startIcon={<AddPhotoAlternateIcon />} onClick={pickImages}>
+                Add Images
+              </MUIButton>
+              <MUIButton
+                variant="contained"
+                color="primary"
+                size="small"
+                startIcon={<AutoFixHighIcon />}
+                onClick={processAllItems}
                 disabled={isProcessing || queuedItems.length === 0}
-              />
-            </View>
-            <View style={styles.headerButtons}>
-              <Button title="Debug State" onPress={logCurrentState} />
-              <Button title="Clear All" onPress={clearAllState} />
+              >
+                {isProcessing ? 'Processing...' : 'Process All'}
+              </MUIButton>
+              <MUIButton variant="outlined" size="small" color="error" startIcon={<DeleteSweepIcon />} onClick={clearAllState}>
+                Clear All
+              </MUIButton>
             </View>
           </ThemedView>
 
@@ -901,7 +893,7 @@ export default function UploadScreen() {
             {queuedItems.length === 0 ? (
               <ThemedView style={styles.emptyState}>
                 <Ionicons name="cloud-upload-outline" size={40} color="#888" />
-                <ThemedText style={styles.emptyText}>Drag images here or tap "Add Images"</ThemedText>
+                <ThemedText style={styles.emptyText}>Drag images here or tap &quot;Add Images&quot;</ThemedText>
               </ThemedView>
             ) : (
               queuedItems.map(item => (
@@ -1307,6 +1299,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginTop: 8,
+  },
+  headerButtonsInline: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  headerButtonsInlineRight: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 8,
   },
   section: {
     margin: 16,

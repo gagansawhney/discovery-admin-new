@@ -1,0 +1,16 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow public read-only access to pollingLogs, which was likely the previous implicit rule
+    match /pollingLogs/{logId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Allow public read-only access to scrapeSchedules
+    match /scrapeSchedules/{scheduleId} {
+      allow read: if true;
+      allow write: if false;
+    }
+  }
+}

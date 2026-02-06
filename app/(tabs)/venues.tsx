@@ -1,18 +1,25 @@
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { Ionicons } from '@expo/vector-icons';
+import AddLocationAltIcon from '@mui/icons-material/AddLocationAlt';
+import DownloadIcon from '@mui/icons-material/Download';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import { IconButton, Button as MUIButton, Tooltip } from '@mui/material';
+import * as FileSystem from 'expo-file-system';
+import { router, useGlobalSearchParams } from 'expo-router';
+import * as Sharing from 'expo-sharing';
 import React, { useEffect, useState } from 'react';
 import {
-  Alert,
-  Button,
-  FlatList,
-  Linking,
-  Modal,
-  ScrollView,
-  StyleSheet,
-  TextInput,
-  TouchableOpacity,
-  View
+    Alert,
+    Button,
+    FlatList,
+    Linking,
+    Modal,
+    ScrollView,
+    StyleSheet,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
 
 interface Venue {
@@ -39,7 +46,6 @@ interface Venue {
   photoUrls?: string[];
   createdAt: Date;
   updatedAt: Date;
-  lastScan?: Date | null;
 }
 
 interface OpeningHoursForm {
@@ -88,9 +94,17 @@ const DAYS_OF_WEEK = [
 const MANAGE_VENUES_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/manageVenues';
 const GEOCODE_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/geocodeAddress';
 const FETCH_VENUE_DETAILS_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/fetchVenueDetails';
-const RECORD_SCAN_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/recordVenueScan';
+
+// Add SheetJS for web export
+let XLSX: any = null;
+if (typeof window !== 'undefined') {
+  try {
+    XLSX = require('xlsx');
+  } catch (e) {}
+}
 
 export default function VenuesScreen() {
+  const { mode } = useGlobalSearchParams<{ mode?: string }>();
   const [venues, setVenues] = useState<Venue[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -98,6 +112,9 @@ export default function VenuesScreen() {
   const [isGeocoding, setIsGeocoding] = useState(false);
   const [isAutoFilling, setIsAutoFilling] = useState(false);
   const [expandedVenues, setExpandedVenues] = useState<Set<string>>(new Set());
+  const isViewMode = mode === 'view' || mode === undefined;
+  const isAddMode = mode === 'add';
+  const isBulkMode = mode === 'bulk';
   
   // Confirmation modal state
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -121,7 +138,8 @@ export default function VenuesScreen() {
     rating: '',
     userRatingsTotal: '',
     ratingInfo: '',
-    photoUrls: ''
+    photoUrls: '',
+    instagramUsernames: ''
   });
   
   const [openingHours, setOpeningHours] = useState<OpeningHoursForm>({
@@ -134,12 +152,28 @@ export default function VenuesScreen() {
     Sunday: { open: '', close: '', closed: false }
   });
 
-  const [sortBy, setSortBy] = useState<'name' | 'scanTime'>('name');
+
 
   // Load venues on component mount
   useEffect(() => {
     loadVenues();
   }, []);
+
+  // React to mode changes: auto-open add modal in add mode; ensure closed in view mode
+  useEffect(() => {
+    if (isAddMode) {
+      // If already editing, keep; otherwise open a clean add modal
+      if (!showAddModal) {
+        resetForm();
+        setShowAddModal(true);
+      }
+    } else {
+      // In view mode, ensure add modal is closed
+      if (showAddModal && !editingVenue) {
+        setShowAddModal(false);
+      }
+    }
+  }, [isAddMode]);
 
   const loadVenues = async () => {
     try {
@@ -193,12 +227,8 @@ export default function VenuesScreen() {
               ratingInfo: venue.ratingInfo,
               photoUrls: venue.photoUrls,
               createdAt: parseFirestoreTimestamp(venue.createdAt) || new Date(),
-              updatedAt: parseFirestoreTimestamp(venue.updatedAt) || new Date(),
-              lastScan: parseFirestoreTimestamp(venue.lastScan)
+              updatedAt: parseFirestoreTimestamp(venue.updatedAt) || new Date()
             };
-            
-            // Debug logging for lastScan
-            console.log('🏢 Venue:', venue.name, 'lastScan raw:', venue.lastScan, 'parsed:', parsedVenue.lastScan);
             
             return parsedVenue;
           });
@@ -216,23 +246,10 @@ export default function VenuesScreen() {
     }
   };
 
-  // Sort venues based on current sortBy state
+  // Sort venues alphabetically
   const sortedVenues = React.useMemo(() => {
-    if (sortBy === 'name') {
-      return [...venues].sort((a, b) => a.name.localeCompare(b.name));
-    } else if (sortBy === 'scanTime') {
-      return [...venues].sort((a, b) => {
-        // Handle null values - venues without scans come first
-        if (!a.lastScan && !b.lastScan) return a.name.localeCompare(b.name);
-        if (!a.lastScan) return -1; // Never scanned venues first
-        if (!b.lastScan) return 1;  // Never scanned venues first
-        
-        // Both have lastScan, compare timestamps (earliest first)
-        return a.lastScan.getTime() - b.lastScan.getTime(); // Earliest first
-      });
-    }
-    return venues;
-  }, [venues, sortBy]);
+    return [...venues].sort((a, b) => a.name.localeCompare(b.name));
+  }, [venues]);
 
   const resetForm = () => {
     setFormData({
@@ -248,7 +265,8 @@ export default function VenuesScreen() {
       rating: '',
       userRatingsTotal: '',
       ratingInfo: '',
-      photoUrls: ''
+      photoUrls: '',
+      instagramUsernames: ''
     });
     setOpeningHours({
       Monday: { open: '', close: '', closed: false },
@@ -265,6 +283,8 @@ export default function VenuesScreen() {
   const openAddModal = () => {
     resetForm();
     setShowAddModal(true);
+    // Reflect mode in URL for consistency
+    if (!isAddMode) router.push('/venues?mode=add');
   };
 
   const openEditModal = (venue: Venue) => {
@@ -281,16 +301,19 @@ export default function VenuesScreen() {
       rating: venue.rating?.toString() || '',
       userRatingsTotal: venue.userRatingsTotal?.toString() || '',
       ratingInfo: venue.ratingInfo || '',
-      photoUrls: venue.photoUrls?.join(', ') || ''
+      photoUrls: venue.photoUrls?.join(', ') || '',
+      instagramUsernames: (venue as any).instagramUsernames?.join(', ') || ''
     });
     setOpeningHours(venue.openingHours);
     setEditingVenue(venue);
     setShowAddModal(true);
+    if (!isAddMode) router.push('/venues?mode=add');
   };
 
   const closeModal = () => {
     setShowAddModal(false);
     resetForm();
+    if (!isViewMode) router.push('/venues?mode=view');
   };
 
   const saveVenue = async () => {
@@ -367,6 +390,10 @@ export default function VenuesScreen() {
         ratingInfo: formData.ratingInfo.trim() || undefined,
         photoUrls: formData.photoUrls.trim() ? formData.photoUrls.split(',').map(url => url.trim()).filter(url => url) : undefined
       };
+      const instagramUsernames = formData.instagramUsernames.trim()
+        ? formData.instagramUsernames.split(',').map(u => u.trim()).filter(Boolean)
+        : [];
+      (venue as any).instagramUsernames = instagramUsernames;
 
       // Only add coordinates if they are valid numbers
       if (lat !== undefined && lng !== undefined) {
@@ -648,111 +675,72 @@ export default function VenuesScreen() {
     });
   };
 
-  const handleScan = async (venueId: string) => {
-    try {
-      console.log('🔍 Recording scan for venue:', venueId);
-      const response = await fetch(RECORD_SCAN_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ venueId })
-      });
-      if (response.ok) {
-        const data = await response.json();
-        console.log('🔍 Scan response:', data);
-        if (data.success) {
-          Alert.alert('Scan Recorded', 'Scan time has been recorded.');
-          loadVenues();
-        } else {
-          Alert.alert('Error', data.error || 'Failed to record scan');
-        }
-      } else {
-        console.error('🔍 Scan request failed:', response.status);
-        Alert.alert('Error', 'Failed to record scan');
-      }
-    } catch (error) {
-      console.error('🔍 Scan error:', error);
-      Alert.alert('Error', 'Failed to record scan');
-    }
-  };
 
-  // Helper function to check if scan was today
-  const isScanToday = (scanDate: Date | null): boolean => {
-    if (!scanDate) return false;
-    const today = new Date();
-    const scanDay = new Date(scanDate);
-    return today.toDateString() === scanDay.toDateString();
-  };
-  
-  // Helper function to get venue card background color
-  const getVenueCardBackgroundColor = (venue: Venue): string => {
-    if (!venue.lastScan) return 'rgba(255, 0, 0, 0.1)'; // Light red for never scanned
-    return isScanToday(venue.lastScan) ? 'rgba(0, 255, 0, 0.1)' : 'rgba(255, 0, 0, 0.1)';
-  };
 
   const renderVenue = ({ item }: { item: Venue }) => {
     const isExpanded = expandedVenues.has(item.id);
     const hasNameVariations = item.nameVariations && item.nameVariations.length > 0;
     const hasOpeningHours = item.openingHours && Object.keys(item.openingHours).length > 0;
-    const backgroundColor = getVenueCardBackgroundColor(item);
     
     return (
-      <ThemedView style={[styles.venueItem, { backgroundColor }]}>
-        <View style={styles.venueHeader}>
-          <View style={styles.venueInfo}>
-            <ThemedText style={styles.venueName}>{item.name}</ThemedText>
-            <ThemedText style={styles.venueAddress}>{item.address}</ThemedText>
-            {item.contactNumber && (
-              <ThemedText style={styles.venueContact}>📞 {item.contactNumber}</ThemedText>
-            )}
-            <ThemedText style={styles.venueCoords}>
-              📍 {item.latitude.toFixed(6)}, {item.longitude.toFixed(6)}
-            </ThemedText>
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
-              <ThemedText style={{ marginRight: 8 }}>
-                Last Scan:{' '}
-                {item.lastScan ? new Date(item.lastScan).toLocaleString() : 'Never'}
-              </ThemedText>
-              <TouchableOpacity onPress={() => handleScan(item.id)} style={{ backgroundColor: '#007AFF', padding: 6, borderRadius: 6 }}>
-                <ThemedText style={{ color: '#fff', fontWeight: 'bold' }}>Scan</ThemedText>
-              </TouchableOpacity>
-            </View>
-          </View>
-          <View style={styles.venueActions}>
-            <TouchableOpacity onPress={() => openEditModal(item)} style={styles.actionButton}>
-              <Ionicons name="pencil" size={20} color="#007AFF" />
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => {
-                console.log('Delete icon pressed for', item.id, item.name);
-                deleteVenue(item);
-              }}
-              style={styles.actionButton}
-            >
-              <Ionicons name="trash" size={20} color="#ff4444" />
-            </TouchableOpacity>
-          </View>
-        </View>
+      <ThemedView style={styles.venueItem}>
+        <TouchableOpacity style={styles.venueHeaderCompact} onPress={() => toggleVenueExpansion(item.id)}>
+          <ThemedText style={styles.venueName} numberOfLines={1}>
+            {item.name}
+          </ThemedText>
+          <Ionicons 
+            name={isExpanded ? 'chevron-up' : 'chevron-down'} 
+            size={18} 
+            color="#007AFF" 
+          />
+        </TouchableOpacity>
         
-        {/* Expand/Collapse Button */}
-        {(hasNameVariations || hasOpeningHours) && (
-          <TouchableOpacity 
-            style={styles.expandButton}
-            onPress={() => toggleVenueExpansion(item.id)}
-          >
-            <ThemedText style={styles.expandButtonText}>
-              {isExpanded ? 'Show Less' : 'Show More'}
-            </ThemedText>
-            <Ionicons 
-              name={isExpanded ? "chevron-up" : "chevron-down"} 
-              size={16} 
-              color="#007AFF" 
-            />
-          </TouchableOpacity>
-        )}
+        {/* Collapsible Content Toggle handled by header */}
         
         {/* Collapsible Content */}
         {isExpanded && (
           <View style={styles.expandedContent}>
+            {/* Actions moved to expanded area */}
+            <View style={[styles.venueActions, { marginBottom: 8 }]}>
+              <TouchableOpacity onPress={() => openEditModal(item)} style={styles.actionButton}>
+                <Ionicons name="pencil" size={20} color="#007AFF" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  console.log('Delete icon pressed for', item.id, item.name);
+                  deleteVenue(item);
+                }}
+                style={styles.actionButton}
+              >
+                <Ionicons name="trash" size={20} color="#ff4444" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Basic Info */}
+            <View style={styles.venueInfo}>
+              {/* Name Variations */}
+              {hasNameVariations && (
+                <View style={styles.nameVariationsInline}>
+                  <ThemedText style={styles.nameVariationsLabel}>Also known as: </ThemedText>
+                  <View style={styles.nameVariationsListInline}>
+                    {item.nameVariations.map((variation, index) => (
+                      <ThemedText key={index} style={styles.nameVariationInline}>
+                        {variation}{index < item.nameVariations.length - 1 ? ', ' : ''}
+                      </ThemedText>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              <ThemedText style={styles.venueAddress}>{item.address}</ThemedText>
+              {item.contactNumber && (
+                <ThemedText style={styles.venueContact}>📞 {item.contactNumber}</ThemedText>
+              )}
+              <ThemedText style={styles.venueCoords}>
+                📍 {item.latitude.toFixed(6)}, {item.longitude.toFixed(6)}
+              </ThemedText>
+            </View>
+
             {/* Website */}
             {item.website && (
               <View style={styles.infoRow}>
@@ -818,19 +806,6 @@ export default function VenuesScreen() {
               </View>
             )}
 
-            {hasNameVariations && (
-              <View style={styles.variationsContainer}>
-                <ThemedText style={styles.variationsLabel}>Name Variations:</ThemedText>
-                <View style={styles.variationsList}>
-                  {item.nameVariations.map((variation, index) => (
-                    <ThemedText key={index} style={styles.variationItem}>
-                      • {variation}
-                    </ThemedText>
-                  ))}
-                </View>
-              </View>
-            )}
-
             {hasOpeningHours && (
               <View style={styles.openingHoursContainer}>
                 <ThemedText style={styles.openingHoursLabel}>Opening Hours:</ThemedText>
@@ -871,35 +846,72 @@ export default function VenuesScreen() {
     );
   };
 
+  // Export venues to Excel/CSV
+  const handleExportVenues = async () => {
+    try {
+      const names = venues.map(v => v.name);
+      const header = ['Venue Name'];
+      const rows = [header, ...names.map(name => [name])];
+      if (typeof window !== 'undefined' && XLSX) {
+        // Web: Use SheetJS to create and download xlsx
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Venues');
+        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        const blob = new Blob([wbout], { type: 'application/octet-stream' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'venues.xlsx';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        }, 100);
+        Alert.alert('Success', 'Venues exported to Excel!');
+      } else {
+        // Native: Export as CSV and share
+        const csv = rows.map(r => r.join(',')).join('\n');
+        const fileUri = FileSystem.cacheDirectory + 'venues.csv';
+        await FileSystem.writeAsStringAsync(fileUri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+        await Sharing.shareAsync(fileUri, { mimeType: 'text/csv', dialogTitle: 'Export Venues' });
+      }
+    } catch (e) {
+      Alert.alert('Error', 'Failed to export venues.');
+    }
+  };
+
   return (
     <ScrollView style={styles.container}>
       <ThemedView style={styles.header}>
         <ThemedText type="title">Venues</ThemedText>
-        <View style={styles.headerButtons}>
-          <Button title="Add Venue" onPress={openAddModal} />
-          <Button title="Refresh" onPress={() => { setSortBy('name'); loadVenues(); }} />
+        <View style={styles.venuesHeaderButtonsRight}>
+          {(!isViewMode && !isBulkMode) && (
+            <MUIButton variant="contained" size="small" startIcon={<AddLocationAltIcon />} onClick={openAddModal}>Add Venue</MUIButton>
+          )}
+          <MUIButton variant="outlined" size="small" startIcon={<DownloadIcon />} onClick={handleExportVenues}>Export to Excel</MUIButton>
+          <Tooltip title="Refresh venues">
+            <IconButton color="primary" size="small" onClick={() => { loadVenues(); }}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
         </View>
       </ThemedView>
 
-      {/* Venues Count */}
-      <ThemedView style={styles.countContainer}>
-        <ThemedText style={styles.countText}>
-          Total Venues: {venues.length}
-        </ThemedText>
-      </ThemedView>
+      {!isBulkMode && (
+        <ThemedView style={styles.countContainer}>
+          <ThemedText style={styles.countText}>
+            Total Venues: {venues.length}
+          </ThemedText>
+        </ThemedView>
+      )}
 
-      {/* Sorting UI - moved to top */}
-      <ThemedView style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', margin: 16, padding: 12, backgroundColor: '#f8f9fa', borderRadius: 8 }}>
-        <ThemedText style={{ marginRight: 16, fontWeight: '600' }}>Sort by:</ThemedText>
-        <TouchableOpacity onPress={() => setSortBy('name')} style={{ marginRight: 12, padding: 8, backgroundColor: sortBy === 'name' ? '#007AFF' : '#e9ecef', borderRadius: 6 }}>
-          <ThemedText style={{ color: sortBy === 'name' ? '#fff' : '#495057', fontWeight: '500' }}>Alphabet</ThemedText>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => setSortBy('scanTime')} style={{ padding: 8, backgroundColor: sortBy === 'scanTime' ? '#007AFF' : '#e9ecef', borderRadius: 6 }}>
-          <ThemedText style={{ color: sortBy === 'scanTime' ? '#fff' : '#495057', fontWeight: '500' }}>Scan Time</ThemedText>
-        </TouchableOpacity>
-      </ThemedView>
-
-      {isLoading ? (
+      {isBulkMode ? (
+        <ThemedView style={{ margin: 16, padding: 16, borderRadius: 8, borderWidth: 1, borderColor: '#eee' }}>
+          <ThemedText>Bulk Add (coming soon)</ThemedText>
+        </ThemedView>
+      ) : isLoading ? (
         <ThemedView style={styles.loadingContainer}>
           <ThemedText>Loading venues...</ThemedText>
         </ThemedView>
@@ -1022,6 +1034,12 @@ export default function VenuesScreen() {
               value={formData.website}
               onChangeText={(text) => setFormData(prev => ({ ...prev, website: text }))}
             />
+            <TextInput
+              style={styles.input}
+              placeholder="Instagram Usernames (comma-separated)"
+              value={formData.instagramUsernames}
+              onChangeText={(text) => setFormData(prev => ({ ...prev, instagramUsernames: text }))}
+            />
           </ThemedView>
 
           <ThemedView style={styles.formSection}>
@@ -1142,7 +1160,7 @@ export default function VenuesScreen() {
           <View style={styles.confirmationModal}>
             <ThemedText style={styles.confirmationTitle}>Delete Venue</ThemedText>
             <ThemedText style={styles.confirmationMessage}>
-              Are you sure you want to delete "{venueToDelete?.name}"?
+              Are you sure you want to delete &quot;{venueToDelete?.name}&quot;?
             </ThemedText>
             <View style={styles.confirmationButtons}>
               <TouchableOpacity style={styles.cancelButton} onPress={cancelDelete}>
@@ -1193,6 +1211,13 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginTop: 8,
   },
+  venuesHeaderButtonsRight: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -1215,18 +1240,29 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#eee',
   },
-  venueHeader: {
+  venueHeaderCompact: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  venueInfo: {
-    flex: 1,
+    alignItems: 'center',
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
   },
   venueName: {
     fontSize: 18,
     fontWeight: 'bold',
-    marginBottom: 4,
+    flex: 1,
+    marginRight: 8,
+  },
+  venueActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  actionButton: {
+    padding: 8,
+  },
+  venueInfo: {
+    flex: 1,
   },
   venueAddress: {
     fontSize: 14,
@@ -1241,13 +1277,6 @@ const styles = StyleSheet.create({
   venueCoords: {
     fontSize: 12,
     color: '#999',
-  },
-  venueActions: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  actionButton: {
-    padding: 8,
   },
   variationsContainer: {
     marginTop: 12,
@@ -1268,6 +1297,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#666',
     marginRight: 8,
+  },
+  nameVariationsInline: {
+    marginBottom: 4,
+  },
+  nameVariationsLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#666',
+  },
+  nameVariationsListInline: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  nameVariationInline: {
+    fontSize: 12,
+    color: '#666',
+    fontStyle: 'italic',
   },
   openingHoursContainer: {
     marginTop: 12,
@@ -1418,21 +1464,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: 'white',
     textAlign: 'center',
-  },
-  expandButton: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 8,
-    marginTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#eee',
-  },
-  expandButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#007AFF',
-    marginRight: 4,
   },
   expandedContent: {
     paddingTop: 12,

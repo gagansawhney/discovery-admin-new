@@ -1,7 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { EventListTabNavigation } from '../../../../components/EventListTabNavigation';
-import { EventsTabNavigation } from '../../../../components/EventsTabNavigation';
 import { ThemedText } from '../../../../components/ThemedText';
 import { ThemedView } from '../../../../components/ThemedView';
 import { Colors } from '../../../../constants/Colors';
@@ -357,8 +355,6 @@ export default function PastEventsScreen() {
   if (loading) {
     return (
       <ThemedView style={styles.container}>
-        <EventsTabNavigation activeTab="list" />
-        <EventListTabNavigation activeTab="past" />
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={Colors[colorScheme].tint} />
           <ThemedText style={styles.loadingText}>Loading past events...</ThemedText>
@@ -370,8 +366,6 @@ export default function PastEventsScreen() {
   if (error) {
     return (
       <ThemedView style={styles.container}>
-        <EventsTabNavigation activeTab="list" />
-        <EventListTabNavigation activeTab="past" />
         <View style={styles.errorContainer}>
           <ThemedText style={styles.errorText}>Error: {error}</ThemedText>
         </View>
@@ -381,8 +375,6 @@ export default function PastEventsScreen() {
 
   return (
     <ThemedView style={styles.container}>
-      <EventsTabNavigation activeTab="list" />
-      <EventListTabNavigation activeTab="past" />
       
       {/* Event Count Header */}
       <View style={styles.countHeader}>
@@ -446,7 +438,7 @@ export default function PastEventsScreen() {
           <View style={[styles.modalContent, { backgroundColor: Colors[colorScheme].background }]}>
             <Text style={[styles.modalTitle, { color: Colors[colorScheme].text }]}>Delete Event</Text>
             <Text style={[styles.modalMessage, { color: Colors[colorScheme].text }]}>
-              Are you sure you want to delete "{eventToDelete?.name}"?
+              Are you sure you want to delete &quot;{eventToDelete?.name}&quot;?
             </Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity

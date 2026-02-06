@@ -36,12 +36,34 @@ exports.startInstagramScraper = functions.https.onRequest({ invoker: 'public', s
     }
     logger.info('--- startInstagramScraper: Request method is POST ---');
 
-    const { instagramUsernames, startDate } = req.body;
-
+    let { instagramUsernames, startDate } = req.body;
+    // If no usernames are provided, gather from venues.instagramUsernames
     if (!instagramUsernames) {
-      logger.error('startInstagramScraper error: Missing Instagram usernames');
-      res.status(400).json({ error: 'Missing Instagram usernames' });
-      return;
+      logger.info('No usernames provided; loading from venues.instagramUsernames');
+      const venuesSnapshot = await externalDb.collection('venues').get();
+      const usernamesSet = new Set();
+      venuesSnapshot.forEach(doc => {
+        const v = doc.data();
+        if (Array.isArray(v.instagramUsernames)) {
+          v.instagramUsernames.forEach((u) => {
+            if (typeof u === 'string' && u.trim()) usernamesSet.add(u.trim());
+          });
+        }
+      });
+      const merged = Array.from(usernamesSet);
+      if (merged.length === 0) {
+        logger.error('startInstagramScraper error: No Instagram usernames found on venues');
+        res.status(400).json({ error: 'No Instagram usernames found on venues' });
+        return;
+      }
+      instagramUsernames = merged.join(',');
+    }
+
+    // Fallback: if no startDate provided, enforce 25h window by default
+    if (!startDate) {
+      const now = new Date();
+      now.setHours(now.getHours() - 25);
+      startDate = now.toISOString().slice(0, 19) + 'Z';
     }
 
     logger.info('--- startInstagramScraper: Received request ---', { instagramUsernames, startDate });
@@ -93,6 +115,8 @@ exports.startInstagramScraper = functions.https.onRequest({ invoker: 'public', s
         status: 'initiated',
         initiatedAt: new Date().toISOString(),
         instagramUsernames: instagramUsernames,
+        type: 'posts',
+        startDateUsed: startDate,
       });
       // Respond immediately
       logger.info('--- startInstagramScraper: Responding to client ---', { runId: runResult.data.id });

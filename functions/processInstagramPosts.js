@@ -122,14 +122,25 @@ async function processAcceptedPost(post, originalIndex, results) {
       stack: error.stack
     });
 
+    // Check if this is a venue not found error
+    const isVenueNotFound = error.message && error.message.includes('Venue not found in venues collection');
+    
     results.errors.push({
       postIndex: originalIndex,
       postId,
       error: error.message
     });
     results.failed++;
-    // Always remove from queue for failed/errored posts
-    removeFromQueue = true;
+    
+    // Only remove from queue if it's NOT a venue not found error
+    // This allows the post to be processed again after adding the venue
+    if (!isVenueNotFound) {
+      removeFromQueue = true;
+      logger.info(`--- processAcceptedPost: Will remove post from queue (non-venue error) ---`, { postId });
+    } else {
+      logger.info(`--- processAcceptedPost: Will NOT remove post from queue (venue not found) ---`, { postId });
+    }
+    
     return { success: false, error: error.message };
   } finally {
     if (removeFromQueue) {
@@ -254,6 +265,22 @@ async function saveEventToFirestore(eventData, post) {
   try {
     logger.info(`--- saveEventToFirestore: Starting save ---`, { eventName: eventData.name });
 
+    // Validate venue exists in venues collection
+    if (!eventData.venue || !eventData.venue.name) {
+      throw new Error('Event must have a venue name');
+    }
+
+    const venueData = await lookupVenue(eventData.venue.name);
+    if (!venueData) {
+      throw new Error(`Venue not found in venues collection: "${eventData.venue.name}". Please add this venue first.`);
+    }
+
+    logger.info(`--- saveEventToFirestore: Venue validated ---`, { 
+      originalVenueName: eventData.venue.name,
+      canonicalVenueName: venueData.name,
+      venueId: venueData.id
+    });
+
     // Generate embedding for searchText
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.trim() : undefined;
     if (!OPENAI_API_KEY) {
@@ -279,9 +306,21 @@ async function saveEventToFirestore(eventData, post) {
     }
     eventData.embedding = FieldValue.vector(embedding);
 
+    // Replace venue data with canonical venue data from venues collection
+    const canonicalVenue = {
+      name: venueData.name,
+      address: venueData.address,
+      geo: {
+        lat: venueData.latitude,
+        lon: venueData.longitude
+      }
+    };
+
     // Add source information
     const eventWithSource = {
       ...eventData,
+      venue: canonicalVenue,
+      venueId: venueData.id, // Link to venue document
       source: {
         platform: 'instagram',
         postId: post.id || post.shortcode,
@@ -300,7 +339,11 @@ async function saveEventToFirestore(eventData, post) {
     const eventRef = externalDb.collection('events').doc(eventWithSource.id);
     await eventRef.set(eventWithSource);
 
-    logger.info(`--- saveEventToFirestore: Save successful ---`, { eventId: eventWithSource.id });
+    logger.info(`--- saveEventToFirestore: Save successful ---`, { 
+      eventId: eventWithSource.id,
+      venueId: venueData.id,
+      canonicalVenueName: venueData.name
+    });
 
     return eventWithSource.id;
   } catch (error) {
@@ -373,6 +416,72 @@ async function checkForDuplicateEventByVenueAndDate(event) {
   } catch (error) {
     logger.error('Error checking for duplicate event by venue and date', { error: error.message });
     return false;
+  }
+}
+
+// Helper function to lookup venue in venues collection
+async function lookupVenue(venueName) {
+  try {
+    logger.info(`--- lookupVenue: Looking up venue ---`, { venueName });
+    
+    if (!venueName || typeof venueName !== 'string' || !venueName.trim()) {
+      logger.warn(`--- lookupVenue: Invalid venue name ---`, { venueName });
+      return null;
+    }
+    
+    const normalizedVenueName = venueName.trim().toLowerCase();
+    
+    // First, try exact match on venue name
+    let venueSnapshot = await externalDb.collection('venues')
+      .where('name', '==', venueName.trim())
+      .limit(1)
+      .get();
+    
+    if (!venueSnapshot.empty) {
+      const venueDoc = venueSnapshot.docs[0];
+      const venueData = venueDoc.data();
+      logger.info(`--- lookupVenue: Found exact match ---`, { 
+        venueName, 
+        venueId: venueDoc.id,
+        canonicalName: venueData.name 
+      });
+      return {
+        id: venueDoc.id,
+        ...venueData
+      };
+    }
+    
+    // If no exact match, check name variations
+    const allVenuesSnapshot = await externalDb.collection('venues').get();
+    
+    for (const doc of allVenuesSnapshot.docs) {
+      const venueData = doc.data();
+      const nameVariations = venueData.nameVariations || [];
+      
+      // Check if the venue name matches any variation (case-insensitive)
+      const matchesVariation = nameVariations.some(variation => 
+        variation.toLowerCase() === normalizedVenueName
+      );
+      
+      if (matchesVariation) {
+        logger.info(`--- lookupVenue: Found match in name variations ---`, { 
+          venueName, 
+          venueId: doc.id,
+          canonicalName: venueData.name,
+          matchedVariation: nameVariations.find(v => v.toLowerCase() === normalizedVenueName)
+        });
+        return {
+          id: doc.id,
+          ...venueData
+        };
+      }
+    }
+    
+    logger.warn(`--- lookupVenue: No venue found ---`, { venueName });
+    return null;
+  } catch (error) {
+    logger.error(`--- lookupVenue: Error looking up venue ---`, { venueName, error: error.message });
+    throw error;
   }
 }
 

@@ -1,28 +1,34 @@
-import { EventsTabNavigation } from '@/components/EventsTabNavigation';
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { Ionicons } from '@expo/vector-icons';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import HistoryIcon from '@mui/icons-material/History';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import { IconButton, Button as MUIButton, Tooltip } from '@mui/material';
 import { useFocusEffect } from '@react-navigation/native';
+import { useGlobalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Button, Image, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Modal, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 const START_SCRAPER_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/startInstagramScraper';
+const START_STORIES_SCRAPER_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/startInstagramStoriesScraper';
 const GET_RUNS_LIST_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/getApifyRunsList';
-const ADD_USERNAME_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/addUsername';
-const DELETE_USERNAME_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/deleteUsername';
-const LIST_USERNAMES_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/listUsernames';
+// Username endpoints removed; scraper pulls from venues now
 const DELETE_APIFY_RUN_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/deleteApifyRun';
+// Automatic scheduling moved to sibling page `scraper-automatic`
 
 interface ApifyRun {
   runId: string;
   datasetId: string;
-  status: 'initiated' | 'running' | 'succeeded' | 'failed';
+  status: 'initiated' | 'running' | 'succeeded' | 'failed' | 'COMPLETED' | string;
   initiatedAt: string;
   completedAt?: string;
   instagramUsernames: string;
   numberOfPosts: number;
   error?: string;
   scrapedData?: any[];
+  type?: 'posts' | 'stories';
 }
 
 // Polyfill EventSource for React Native and web
@@ -38,21 +44,17 @@ if (typeof window !== 'undefined' && window.EventSource) {
 }
 
 export default function ScraperScreen() {
-  const [instagramUsernames, setInstagramUsernames] = useState('');
-  const [numberOfPosts, setNumberOfPosts] = useState('10');
-  const [startDate, setStartDate] = useState(''); // This will store the formatted date string
-  const [selectedDate, setSelectedDate] = useState(new Date()); // Actual Date object for picker
-  const [isDatePickerVisible, setDatePickerVisibility] = useState(false);
-  const [isScraping, setIsScraping] = useState(false);
-  const [scrapeResult, setScrapeResult] = useState<string | null>(null);
-  const [scrapeError, setScrapeError] = useState<string | null>(null);
+  // Username management moved to Venues
+  const [activeTab, setActiveTab] = useState<'pending' | 'completed'>('pending');
   const [apifyRuns, setApifyRuns] = useState<ApifyRun[]>([]);
   const [isLoadingRuns, setIsLoadingRuns] = useState(false);
-  const [pollingRunId, setPollingRunId] = useState<string | null>(null);
-  const [usernameInput, setUsernameInput] = useState('');
-  const [usernames, setUsernames] = useState<string[]>([]); // List of IG usernames
-  const [isAddingUsername, setIsAddingUsername] = useState(false);
-  const [activeTab, setActiveTab] = useState<'pending' | 'completed'>('pending');
+  const [isScraping, setIsScraping] = useState(false);
+  const [isStoriesScraping, setIsStoriesScraping] = useState(false);
+  const [scrapeResult, setScrapeResult] = useState<string | null>(null);
+  const [scrapeError, setScrapeError] = useState<string | null>(null);
+  const [storiesScrapeResult, setStoriesScrapeResult] = useState<string | null>(null);
+  const [storiesScrapeError, setStoriesScrapeError] = useState<string | null>(null);
+
   const [selectedRun, setSelectedRun] = useState<ApifyRun | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [pollingLogs, setPollingLogs] = useState<any[]>([]);
@@ -62,7 +64,7 @@ export default function ScraperScreen() {
   const [scrapedData, setScrapedData] = useState<any[]>([]);
   const [isScrapedDataLoading, setIsScrapedDataLoading] = useState(false);
   const [currentPostIndex, setCurrentPostIndex] = useState(0);
-  const [currentImageIndex, setCurrentImageIndex] = useState(0);
+  const [currentMediaIndex, setCurrentMediaIndex] = useState(0);
   const [postDecisions, setPostDecisions] = useState<{[key: number]: 'accept' | 'reject' | null}>({});
   const [processingResults, setProcessingResults] = useState<any>(null);
   const [postErrors, setPostErrors] = useState<{[key: number]: string}>({});
@@ -73,6 +75,22 @@ export default function ScraperScreen() {
   const [liveProcessingStatus, setLiveProcessingStatus] = useState<any[]>([]); // For SSE events
   const [liveSummary, setLiveSummary] = useState<any>(null);
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const [isUsernamesExpanded, setIsUsernamesExpanded] = useState(false);
+  const { type: initialTypeParam } = useGlobalSearchParams<{ type?: string }>();
+  const [scraperTab, setScraperTab] = useState<'posts' | 'stories'>(
+    initialTypeParam === 'stories' ? 'stories' : 'posts'
+  );
+
+  // Run list display controls
+  const [pendingShownCount, setPendingShownCount] = useState<number>(5);
+  const [completedShownCount, setCompletedShownCount] = useState<number>(5);
+  const [isClearingLogs, setIsClearingLogs] = useState<boolean>(false);
+ 
+  useEffect(() => {
+    setScraperTab(initialTypeParam === 'stories' ? 'stories' : 'posts');
+  }, [initialTypeParam]);
+ 
+  // URL is updated only on tab button press to avoid render loops
 
   const fetchApifyRuns = useCallback(async () => {
     setIsLoadingRuns(true);
@@ -97,72 +115,7 @@ export default function ScraperScreen() {
     fetchApifyRuns();
   }, [fetchApifyRuns]);
 
-  // Fetch usernames from backend
-  const fetchUsernames = useCallback(async () => {
-    try {
-      const response = await fetch(LIST_USERNAMES_URL);
-      const data = await response.json();
-      if (response.ok && data.success) {
-        setUsernames(data.usernames);
-      } else {
-        setUsernames([]);
-      }
-    } catch (e) {
-      setUsernames([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchUsernames();
-  }, [fetchUsernames]);
-
-  // Add username via backend
-  const handleAddUsername = async () => {
-    const trimmed = usernameInput.trim();
-    if (!trimmed) return;
-    if (usernames.includes(trimmed)) {
-      Alert.alert('Duplicate', 'This username is already added.');
-      return;
-    }
-    setIsAddingUsername(true);
-    try {
-      const response = await fetch(ADD_USERNAME_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: trimmed }),
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
-        setUsernameInput('');
-        fetchUsernames();
-      } else {
-        Alert.alert('Error', data.error || 'Failed to add username.');
-      }
-    } catch (e) {
-      Alert.alert('Error', 'Failed to add username.');
-    } finally {
-      setIsAddingUsername(false);
-    }
-  };
-
-  // Remove username via backend
-  const handleDeleteUsername = async (username: string) => {
-    try {
-      const response = await fetch(DELETE_USERNAME_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username }),
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
-        fetchUsernames();
-      } else {
-        Alert.alert('Error', data.error || 'Failed to delete username.');
-      }
-    } catch (e) {
-      Alert.alert('Error', 'Failed to delete username.');
-    }
-  };
+  // Username add/delete removed
 
   // Delete Apify run and its contents
   const handleDeleteApifyRun = async (runId: string) => {
@@ -218,15 +171,11 @@ export default function ScraperScreen() {
 
   // On Start Scraper, send all usernames as comma-separated string
   const handleScrape = async () => {
-    if (usernames.length === 0) {
-      Alert.alert('Error', 'Please add at least one Instagram username.');
-      return;
-    }
     setIsScraping(true);
     setScrapeResult(null);
     setScrapeError(null);
     const payload = {
-      instagramUsernames: usernames.join(','),
+      // instagramUsernames omitted -> backend will load from venues
       startDate: get25HoursAgoISOString(),
     };
     console.log('Sending to startInstagramScraper:', payload);
@@ -254,9 +203,43 @@ export default function ScraperScreen() {
     }
   };
 
+  // Start Stories scraper
+  const handleScrapeStories = async () => {
+    setIsStoriesScraping(true);
+    setStoriesScrapeResult(null);
+    setStoriesScrapeError(null);
+    const payload = {
+      // instagramUsernames omitted -> backend will load from venues
+    };
+    console.log('Sending to startInstagramStoriesScraper:', payload);
+    try {
+      const response = await fetch(START_STORIES_SCRAPER_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      console.log('Received from startInstagramStoriesScraper:', data);
+      if (response.ok && data.success) {
+        setStoriesScrapeResult(`Stories scraping initiated! Run ID: ${data.runId}`);
+        Alert.alert('Success', `Stories scraping initiated! Run ID: ${data.runId}`);
+        fetchApifyRuns();
+      } else {
+        setStoriesScrapeError(data.error || 'Failed to initiate stories scraping.');
+        Alert.alert('Error', data.error || 'Failed to initiate stories scraping.');
+      }
+    } catch (error: any) {
+      setStoriesScrapeError(`Network error: ${error.message}`);
+      Alert.alert('Error', `Network error: ${error.message}`);
+    } finally {
+      setIsStoriesScraping(false);
+    }
+  };
+
   // Split runs into pending and completed
-  const pendingRuns = apifyRuns.filter(run => run.status === 'initiated' || run.status === 'running');
-  const completedRuns = apifyRuns.filter(run => ['COMPLETED', 'succeeded', 'failed'].includes(run.status));
+  const runsForTab = apifyRuns.filter(run => scraperTab === 'stories' ? run.type === 'stories' : (run.type !== 'stories'));
+  const pendingRuns = runsForTab.filter(run => run.status === 'initiated' || run.status === 'running');
+  const completedRuns = runsForTab.filter(run => ['COMPLETED', 'succeeded', 'failed'].includes(run.status));
 
   // Fetch polling logs from Firestore
   const fetchPollingLogs = useCallback(async () => {
@@ -312,6 +295,8 @@ export default function ScraperScreen() {
     }
   };
 
+  // Automatic scheduling moved to sibling page `scraper-automatic`
+
   // Function to delete a polling log entry
   const handleDeletePollLog = async (logId: string) => {
     try {
@@ -347,7 +332,7 @@ export default function ScraperScreen() {
         setScrapedData(data.data);
         // Reset all state when fetching new data
         setCurrentPostIndex(0);
-        setCurrentImageIndex(0);
+        setCurrentMediaIndex(0);
         setPostDecisions({});
         setPostErrors({});
         setImageLoadErrors({});
@@ -384,42 +369,74 @@ export default function ScraperScreen() {
   const goToNextPost = () => {
     if (currentPostIndex < filteredScrapedData.length - 1) {
       setCurrentPostIndex(currentPostIndex + 1);
-      setCurrentImageIndex(0);
+      setCurrentMediaIndex(0);
     }
   };
 
   const goToPreviousPost = () => {
     if (currentPostIndex > 0) {
       setCurrentPostIndex(currentPostIndex - 1);
-      setCurrentImageIndex(0);
+      setCurrentMediaIndex(0);
     }
   };
 
-  const goToNextImage = () => {
+  const goToNextMedia = () => {
     const currentPost = filteredScrapedData[currentPostIndex];
-    const images = getPostImages(currentPost);
-    if (currentImageIndex < images.length - 1) {
-      setCurrentImageIndex(currentImageIndex + 1);
+    const media = getPostMedia(currentPost);
+    if (currentMediaIndex < media.length - 1) {
+      setCurrentMediaIndex(currentMediaIndex + 1);
     }
   };
 
-  const goToPreviousImage = () => {
-    if (currentImageIndex > 0) {
-      setCurrentImageIndex(currentImageIndex - 1);
+  const goToPreviousMedia = () => {
+    if (currentMediaIndex > 0) {
+      setCurrentMediaIndex(currentMediaIndex - 1);
     }
   };
 
-  const getPostImages = (post: any): string[] => {
-    const images: string[] = [];
-    if (post.displayUrl) images.push(post.displayUrl);
-    if (post.thumbnailUrl && !images.includes(post.thumbnailUrl)) images.push(post.thumbnailUrl);
-    if (post.images && Array.isArray(post.images)) {
-      post.images.forEach((img: any) => {
-        if (img.url && !images.includes(img.url)) images.push(img.url);
+  function getPostMedia(post: any): Array<{ type: 'image' | 'video'; url: string; thumb?: string }> {
+    const mediaItems: Array<{ type: 'image' | 'video'; url: string; thumb?: string }> = [];
+    const seen = new Set<string>();
+    const add = (type: 'image' | 'video', url?: string, thumb?: string) => {
+      if (!url) return;
+      if (seen.has(url)) return;
+      seen.add(url);
+      mediaItems.push({ type, url, thumb });
+    };
+
+    const displayUrl: string | undefined = post?.displayUrl;
+    const thumbnailUrl: string | undefined = post?.thumbnailUrl || post?.thumbnail;
+    const mediaField: string | undefined = post?.media || post?.mediaUrl;
+    const mediaType: string | undefined = (post?.mediaType || '').toString().toLowerCase();
+
+    // Images array (common in posts)
+    if (Array.isArray(post?.images)) {
+      post.images.forEach((img: any) => add('image', img?.url));
+    }
+
+    const isDisplayVideo = typeof displayUrl === 'string' && displayUrl.includes('.mp4');
+    const isMediaFieldVideo = typeof mediaField === 'string' && mediaField.includes('.mp4');
+    const isVideoByType = mediaType === 'video';
+
+    // Prefer explicit video entries
+    if (isDisplayVideo) add('video', displayUrl, thumbnailUrl);
+    if (isMediaFieldVideo || isVideoByType) add('video', mediaField, thumbnailUrl);
+
+    // Add images only if not mp4
+    if (displayUrl && !isDisplayVideo) add('image', displayUrl);
+    if (thumbnailUrl && !thumbnailUrl.includes('.mp4')) add('image', thumbnailUrl);
+    if (mediaField && !isMediaFieldVideo) add('image', mediaField);
+
+    // Fallback: infer from any known url fields
+    if (mediaItems.length === 0) {
+      const candidates = [post?.url, post?.image, post?.source];
+      candidates.forEach((c: any) => {
+        if (typeof c === 'string') add(c.includes('.mp4') ? 'video' : 'image', c);
       });
     }
-    return images;
-  };
+
+    return mediaItems;
+  }
 
   const handlePostDecision = (decision: 'accept' | 'reject') => {
     setIsPostDecisionLoading(true);
@@ -538,15 +555,13 @@ export default function ScraperScreen() {
       });
       setPostDecisions(newDecisions);
       setCurrentPostIndex(0);
-      setCurrentImageIndex(0);
+      setCurrentMediaIndex(0);
     }
     setLiveSummary(null);
   };
 
   return (
     <ScrollView style={styles.container}>
-      <EventsTabNavigation activeTab="scraper" />
-
       <ThemedView style={styles.header}>
         <ThemedText type="title">Instagram Scraper</ThemedText>
         <ThemedText style={styles.subtitle}>
@@ -554,154 +569,319 @@ export default function ScraperScreen() {
         </ThemedText>
       </ThemedView>
 
-      <ThemedView style={styles.section}>
-        <ThemedText style={styles.fieldLabel}>Instagram Usernames</ThemedText>
-        {/* List usernames with delete icon */}
-        {usernames.length > 0 && (
-          <View style={{ marginBottom: 8 }}>
-            {usernames.map((username) => (
-              <View key={username} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
-                <ThemedText style={{ flex: 1 }}>{username}</ThemedText>
-                <TouchableOpacity onPress={() => handleDeleteUsername(username)}>
-                  <Ionicons name="close-circle" size={20} color="#ff4444" />
-                </TouchableOpacity>
-              </View>
-            ))}
-          </View>
-        )}
-        {/* Username input and Add Now button */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-          <TextInput
-            value={usernameInput}
-            onChangeText={setUsernameInput}
-            placeholder="Instagram username"
-            style={[styles.input, { flex: 1 }]}
-            editable={!isAddingUsername}
-          />
-          <TouchableOpacity
-            onPress={handleAddUsername}
-            style={[styles.addButton, { backgroundColor: '#007AFF' }]}
-            disabled={isAddingUsername}
-          >
-            {isAddingUsername ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <ThemedText style={{ color: '#fff' }}>Add Now</ThemedText>
-            )}
-          </TouchableOpacity>
-        </View>
-      </ThemedView>
-
-      {/* Remove or hide Start Date and Time input section */}
-      {/* <ThemedView style={styles.section}>
-        <ThemedText style={styles.fieldLabel}>Start Date and Time</ThemedText>
-        {Platform.OS === 'web' ? (
-          <input
-            type="datetime-local"
-            value={selectedDate.toISOString().slice(0, 16)}
-            disabled
-            style={styles.webDatePicker as any}
-          />
-        ) : (
-          <TouchableOpacity style={[styles.datePickerButton, { opacity: 0.5 }]} disabled>
-            <ThemedText>{selectedDate.toLocaleString()}</ThemedText>
-          </TouchableOpacity>
-        )}
-        <DateTimePickerModal
-          isVisible={false} // Always hidden
-          mode="datetime"
-          onConfirm={() => {}}
-          onCancel={() => {}}
-          date={selectedDate}
-        />
-      </ThemedView> */}
-
-      <ThemedView style={styles.section}>
-        <ThemedText style={styles.fieldLabel}>Number of Posts</ThemedText>
-        <TextInput
-          value={numberOfPosts}
-          onChangeText={setNumberOfPosts}
-          placeholder="Number of posts"
-          style={styles.formInput}
-          keyboardType="numeric"
-        />
-      </ThemedView>
-
-      <ThemedView style={styles.section}>
-        <Button
-          title={isScraping ? "Scraping..." : "Start Scraper"}
-          onPress={handleScrape}
-          disabled={isScraping}
-        />
-        {scrapeResult && <ThemedText style={styles.resultText}>Result: {scrapeResult}</ThemedText>}
-        {scrapeError && <ThemedText style={styles.errorText}>Error: {scrapeError}</ThemedText>}
-      </ThemedView>
-
-      <ThemedView style={styles.section}>
-        <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-          <TouchableOpacity
-            style={[styles.tabButton, activeTab === 'pending' && styles.activeTabButton]}
-            onPress={() => setActiveTab('pending')}
-          >
-            <ThemedText style={activeTab === 'pending' ? styles.activeTabText : undefined}>Pending Scraping Runs</ThemedText>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tabButton, activeTab === 'completed' && styles.activeTabButton]}
-            onPress={() => setActiveTab('completed')}
-          >
-            <ThemedText style={activeTab === 'completed' ? styles.activeTabText : undefined}>Completed Scraper Runs</ThemedText>
-          </TouchableOpacity>
-        </View>
-        {activeTab === 'pending' ? (
-          isLoadingRuns ? (
-            <ActivityIndicator size="small" color="#007AFF" />
-          ) : pendingRuns.length === 0 ? (
-            <ThemedText>No pending runs.</ThemedText>
-          ) : (
-            pendingRuns.map(run => (
-              <View key={run.runId} style={styles.runItem}>
-                <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
-                <ThemedText>Status: {run.status}</ThemedText>
-                <ThemedText>Initiated: {new Date(run.initiatedAt).toLocaleString()}</ThemedText>
-                {run.error && <ThemedText style={styles.errorText}>Error: {run.error}</ThemedText>}
-              </View>
-            ))
-          )
-        ) : (
-          isLoadingRuns ? (
-            <ActivityIndicator size="small" color="#007AFF" />
-          ) : completedRuns.length === 0 ? (
-            <ThemedText>No completed runs.</ThemedText>
-          ) : (
-            completedRuns.map(run => (
-              <View key={run.runId} style={styles.runItem}>
-                <TouchableOpacity
-                  style={styles.runContent}
-                  onPress={() => { setSelectedRun(run); setModalVisible(true); }}
+      <>
+          {scraperTab === 'posts' ? (
+            <>
+              <ThemedView style={styles.section}>
+                <MUIButton
+                  variant="contained"
+                  color="primary"
+                  size="small"
+                  startIcon={<PlayArrowIcon />}
+                  onClick={handleScrape}
+                  disabled={isScraping}
                 >
-                  <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
-                  <ThemedText>Status: {run.status}</ThemedText>
-                  <ThemedText>Initiated: {new Date(run.initiatedAt).toLocaleString()}</ThemedText>
-                  {run.completedAt && <ThemedText>Completed: {new Date(run.completedAt).toLocaleString()}</ThemedText>}
-                  {run.error && <ThemedText style={styles.errorText}>Error: {run.error}</ThemedText>}
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.deleteButton}
-                  onPress={() => handleDeleteApifyRun(run.runId)}
-                  disabled={deletingRunId === run.runId}
-                >
-                  {deletingRunId === run.runId ? (
-                    <ActivityIndicator size="small" color="#ff4444" />
+                  {isScraping ? 'Scraping...' : 'Start Scraper'}
+                </MUIButton>
+                {scrapeResult && <ThemedText style={styles.resultText}>Result: {scrapeResult}</ThemedText>}
+                {scrapeError && <ThemedText style={styles.errorText}>Error: {scrapeError}</ThemedText>}
+              </ThemedView>
+
+              {/* Pending and Completed Runs Section */}
+              <ThemedView style={styles.section}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                  <ThemedText type="subtitle" style={{ flex: 1 }}>Pending Scraping Runs</ThemedText>
+                  <Tooltip title="Trigger poll now">
+                    <span>
+                      <MUIButton
+                        variant="outlined"
+                        size="small"
+                        startIcon={<PlayArrowIcon />}
+                        onClick={handleManualPoll}
+                        disabled={isManualPollLoading}
+                      >
+                        {isManualPollLoading ? 'Polling...' : 'Poll'}
+                      </MUIButton>
+                    </span>
+                  </Tooltip>
+                </View>
+                {isLoadingRuns ? (
+                    <ActivityIndicator size="small" color="#007AFF" />
+                  ) : pendingRuns.length === 0 ? (
+                    <ThemedText>No pending runs.</ThemedText>
                   ) : (
-                    <Ionicons name="trash-outline" size={20} color="#ff4444" />
-                  )}
+                  pendingRuns.slice(0, pendingShownCount).map(run => (
+                      <View key={run.runId} style={styles.runItem}>
+                      <TouchableOpacity
+                        style={styles.runContent}
+                        onPress={() => { setSelectedRun(run); setModalVisible(true); }}
+                      >
+                        <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
+                        <ThemedText>Status: {run.status}</ThemedText>
+                        <ThemedText>Initiated: {new Date(run.initiatedAt).toLocaleString()}</ThemedText>
+                        {run.error && <ThemedText style={styles.errorText}>Error: {run.error}</ThemedText>}
+                      </TouchableOpacity>
+                      </View>
+                    ))
+                )}
+                {pendingRuns.length > pendingShownCount && (
+                  <View style={{ alignItems: 'center', marginTop: 8 }}>
+                    <TouchableOpacity onPress={() => setPendingShownCount(c => c + 5)}>
+                      <ThemedText style={{ color: '#007AFF' }}>Show more</ThemedText>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </ThemedView>
+
+              <ThemedView style={styles.section}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                  <ThemedText type="subtitle" style={{ flex: 1 }}>Completed Scraper Runs</ThemedText>
+                  <Tooltip title="Refresh runs">
+                    <IconButton color="primary" size="small" onClick={fetchApifyRuns}>
+                      <RefreshIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </View>
+                {isLoadingRuns ? (
+                    <ActivityIndicator size="small" color="#007AFF" />
+                  ) : completedRuns.length === 0 ? (
+                    <ThemedText>No completed runs.</ThemedText>
+                  ) : (
+                  completedRuns.slice(0, completedShownCount).map(run => (
+                      <View key={run.runId} style={styles.runItem}>
+                        <TouchableOpacity
+                          style={styles.runContent}
+                          onPress={() => { setSelectedRun(run); setModalVisible(true); }}
+                        >
+                          <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
+                          <ThemedText>Status: {run.status}</ThemedText>
+                          <ThemedText>Initiated: {new Date(run.initiatedAt).toLocaleString()}</ThemedText>
+                          {run.completedAt && <ThemedText>Completed: {new Date(run.completedAt).toLocaleString()}</ThemedText>}
+                          {run.error && <ThemedText style={styles.errorText}>Error: {run.error}</ThemedText>}
+                        </TouchableOpacity>
+                      <Tooltip title="Delete run">
+                        <span>
+                          <IconButton
+                            color="error"
+                            size="small"
+                            onClick={() => handleDeleteApifyRun(run.runId)}
+                          disabled={deletingRunId === run.runId}
+                        >
+                          {deletingRunId === run.runId ? (
+                            <ActivityIndicator size="small" color="#ff4444" />
+                          ) : (
+                              <DeleteOutlineIcon fontSize="small" />
+                          )}
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                      </View>
+                    ))
+                )}
+                {completedRuns.length > completedShownCount && (
+                  <View style={{ alignItems: 'center', marginTop: 8 }}>
+                    <TouchableOpacity onPress={() => setCompletedShownCount(c => c + 5)}>
+                      <ThemedText style={{ color: '#007AFF' }}>Show more</ThemedText>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </ThemedView>
+
+              {/* Polling History Section */}
+              <ThemedView style={styles.section}>
+                <TouchableOpacity onPress={() => setIsPollingLogsExpanded(v => !v)} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                  <ThemedText type="subtitle" style={{ flex: 1 }}>Polling History (Last 10 Polls)</ThemedText>
+                  <Tooltip title="Refresh logs">
+                    <IconButton color="primary" size="small" onClick={fetchPollingLogs}>
+                      <HistoryIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
                 </TouchableOpacity>
-              </View>
-            ))
-          )
-        )}
-        <Button title="Refresh Runs" onPress={fetchApifyRuns} />
-      </ThemedView>
+                {isPollingLogsExpanded && (
+                  isLoadingLogs ? (
+                    <ActivityIndicator size="small" color="#007AFF" />
+                  ) : pollingLogs.length === 0 ? (
+                    <ThemedText>No polling logs found.</ThemedText>
+                  ) : (
+                    pollingLogs.map(log => (
+                      <View key={log.id} style={styles.pollLogItem}>
+                        <ThemedText style={{ fontWeight: 'bold' }}>{log.timestamp ? new Date(log.timestamp).toLocaleString() : 'Unknown time'}</ThemedText>
+                        <ThemedText>Checked: {log.checkedRunIds ? log.checkedRunIds.length : 0}</ThemedText>
+                        <ThemedText>Completed: {log.completedRunIds ? log.completedRunIds.length : 0}</ThemedText>
+                        <ThemedText>Failed: {log.failedRunIds ? log.failedRunIds.length : 0}</ThemedText>
+                        {log.errors && log.errors.length > 0 && (
+                          <ThemedText style={{ color: 'red' }}>Errors: {JSON.stringify(log.errors)}</ThemedText>
+                        )}
+                        <View style={{ alignItems: 'flex-end', marginTop: 6 }}>
+                          <Tooltip title="Delete log">
+                            <IconButton color="error" size="small" onClick={() => handleDeletePollLog(log.id)}>
+                              <DeleteOutlineIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </View>
+                      </View>
+                    ))
+                  )
+                )}
+              </ThemedView>
+            </>
+          ) : (
+            <>
+            <ThemedView style={styles.section}>
+                <MUIButton
+                  variant="contained"
+                  color="primary"
+                  size="small"
+                  startIcon={<PlayArrowIcon />}
+                  onClick={handleScrapeStories}
+                  disabled={isStoriesScraping}
+                >
+                  {isStoriesScraping ? 'Scraping...' : 'Start Stories Scraper'}
+                </MUIButton>
+                {storiesScrapeResult && <ThemedText style={styles.resultText}>Result: {storiesScrapeResult}</ThemedText>}
+                {storiesScrapeError && <ThemedText style={styles.errorText}>Error: {storiesScrapeError}</ThemedText>}
+            </ThemedView>
+
+              {/* Pending and Completed Runs Section (Stories) */}
+              <ThemedView style={styles.section}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                  <ThemedText type="subtitle" style={{ flex: 1 }}>Pending Stories Runs</ThemedText>
+                  <Tooltip title="Trigger poll now">
+                    <span>
+                      <MUIButton
+                        variant="outlined"
+                        size="small"
+                        startIcon={<PlayArrowIcon />}
+                        onClick={handleManualPoll}
+                        disabled={isManualPollLoading}
+                      >
+                        {isManualPollLoading ? 'Polling...' : 'Poll'}
+                      </MUIButton>
+                    </span>
+                  </Tooltip>
+                </View>
+                {isLoadingRuns ? (
+                  <ActivityIndicator size="small" color="#007AFF" />
+                ) : pendingRuns.length === 0 ? (
+                  <ThemedText>No pending runs.</ThemedText>
+                ) : (
+                  pendingRuns.slice(0, pendingShownCount).map(run => (
+                    <View key={run.runId} style={styles.runItem}>
+                      <TouchableOpacity
+                        style={styles.runContent}
+                        onPress={() => { setSelectedRun(run); setModalVisible(true); }}
+                      >
+                        <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
+                        <ThemedText>Status: {run.status}</ThemedText>
+                        <ThemedText>Initiated: {new Date(run.initiatedAt).toLocaleString()}</ThemedText>
+                        {run.error && <ThemedText style={styles.errorText}>Error: {run.error}</ThemedText>}
+                      </TouchableOpacity>
+                    </View>
+                  ))
+                )}
+                {pendingRuns.length > pendingShownCount && (
+                  <View style={{ alignItems: 'center', marginTop: 8 }}>
+                    <TouchableOpacity onPress={() => setPendingShownCount(c => c + 5)}>
+                      <ThemedText style={{ color: '#007AFF' }}>Show more</ThemedText>
+                    </TouchableOpacity>
+                  </View>
+            )}
+          </ThemedView>
+
+              <ThemedView style={styles.section}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                  <ThemedText type="subtitle" style={{ flex: 1 }}>Completed Stories Runs</ThemedText>
+                  <Tooltip title="Refresh runs">
+                    <IconButton color="primary" size="small" onClick={fetchApifyRuns}>
+                      <RefreshIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </View>
+                {isLoadingRuns ? (
+                  <ActivityIndicator size="small" color="#007AFF" />
+                ) : completedRuns.length === 0 ? (
+                  <ThemedText>No completed runs.</ThemedText>
+                ) : (
+                  completedRuns.slice(0, completedShownCount).map(run => (
+                    <View key={run.runId} style={styles.runItem}>
+                      <TouchableOpacity
+                        style={styles.runContent}
+                        onPress={() => { setSelectedRun(run); setModalVisible(true); }}
+                      >
+                        <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
+                        <ThemedText>Status: {run.status}</ThemedText>
+                        <ThemedText>Initiated: {new Date(run.initiatedAt).toLocaleString()}</ThemedText>
+                        {run.completedAt && <ThemedText>Completed: {new Date(run.completedAt).toLocaleString()}</ThemedText>}
+                        {run.error && <ThemedText style={styles.errorText}>Error: {run.error}</ThemedText>}
+                      </TouchableOpacity>
+                      <Tooltip title="Delete run">
+                        <span>
+                          <IconButton
+                            color="error"
+                            size="small"
+                            onClick={() => handleDeleteApifyRun(run.runId)}
+                            disabled={deletingRunId === run.runId}
+                          >
+                            {deletingRunId === run.runId ? (
+                              <ActivityIndicator size="small" color="#ff4444" />
+                            ) : (
+                              <DeleteOutlineIcon fontSize="small" />
+                            )}
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    </View>
+                  ))
+                )}
+                {completedRuns.length > completedShownCount && (
+                  <View style={{ alignItems: 'center', marginTop: 8 }}>
+                    <TouchableOpacity onPress={() => setCompletedShownCount(c => c + 5)}>
+                      <ThemedText style={{ color: '#007AFF' }}>Show more</ThemedText>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </ThemedView>
+
+              {/* Polling History Section */}
+              <ThemedView style={styles.section}>
+                <TouchableOpacity onPress={() => setIsPollingLogsExpanded(v => !v)} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                  <ThemedText type="subtitle" style={{ flex: 1 }}>Polling History (Last 10 Polls)</ThemedText>
+                  <Tooltip title="Refresh logs">
+                    <IconButton color="primary" size="small" onClick={fetchPollingLogs}>
+                      <HistoryIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </TouchableOpacity>
+                {isPollingLogsExpanded && (
+                  isLoadingLogs ? (
+                    <ActivityIndicator size="small" color="#007AFF" />
+                  ) : pollingLogs.length === 0 ? (
+                    <ThemedText>No polling logs found.</ThemedText>
+                  ) : (
+                    pollingLogs.map(log => (
+                      <View key={log.id} style={styles.pollLogItem}>
+                        <ThemedText style={{ fontWeight: 'bold' }}>{log.timestamp ? new Date(log.timestamp).toLocaleString() : 'Unknown time'}</ThemedText>
+                        <ThemedText>Checked: {log.checkedRunIds ? log.checkedRunIds.length : 0}</ThemedText>
+                        <ThemedText>Completed: {log.completedRunIds ? log.completedRunIds.length : 0}</ThemedText>
+                        <ThemedText>Failed: {log.failedRunIds ? log.failedRunIds.length : 0}</ThemedText>
+                        {log.errors && log.errors.length > 0 && (
+                          <ThemedText style={{ color: 'red' }}>Errors: {JSON.stringify(log.errors)}</ThemedText>
+                        )}
+                        <View style={{ alignItems: 'flex-end', marginTop: 6 }}>
+                          <Tooltip title="Delete log">
+                            <IconButton color="error" size="small" onClick={() => handleDeletePollLog(log.id)}>
+                              <DeleteOutlineIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </View>
+                      </View>
+                    ))
+                  )
+                )}
+              </ThemedView>
+            </>
+          )}
+        </>
 
       {/* Modal for completed run details */}
       <Modal
@@ -769,113 +949,114 @@ export default function ScraperScreen() {
                     <ScrollView style={{ flex: 1, marginBottom: 10 }}>
                       {(() => {
                         const currentPost = filteredScrapedData[currentPostIndex];
-                        const images = getPostImages(currentPost);
+                        const media = getPostMedia(currentPost);
                         
                         return (
                           <View>
-                            {/* Image Carousel */}
-                            {images.length > 0 && (
+                            {/* Media Carousel (images/videos) */}
+                            {media.length > 0 && (
                               <View style={styles.imageContainer}>
                                 <View style={styles.imageWrapper}>
-                                  {imageLoadErrors[images[currentImageIndex]] ? (
-                                    <View style={styles.imageErrorContainer}>
-                                      <Ionicons name="image-outline" size={48} color="#ccc" />
-                                      <ThemedText style={styles.imageErrorText}>
-                                        Image not available
-                                      </ThemedText>
-                                      <ThemedText style={styles.imageErrorSubtext}>
-                                        {typeof imageLoadErrors[images[currentImageIndex]] === 'string' && imageLoadErrors[images[currentImageIndex]]}
-                                        {typeof imageLoadErrors[images[currentImageIndex]] !== 'string' && '(CORS restricted or failed to load)'}
-                                      </ThemedText>
-                                    </View>
-                                  ) : !imageLoadSuccess[images[currentImageIndex]] ? (
-                                    // Show loader while image is loading
-                                    <ImageLoaderWithTimeout
-                                      imageUrl={images[currentImageIndex]}
-                                      onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
-                                      onError={(errMsg) => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: errMsg || true }))}
-                                    >
-                                      {Platform.OS === 'web' ? (
-                                        <img
-                                          src={`https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`}
-                                          alt="Instagram post"
-                                          style={styles.image}
-                                          onError={() => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: 'Failed to load image' }))}
-                                          onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
-                                        />
+                                  {(() => {
+                                    const item = media[currentMediaIndex];
+                                    const proxiedUrl = `https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(item.url)}`;
+                                    if (item.type === 'video') {
+                                      if (Platform.OS === 'web') {
+                                        return (
+                                          <video
+                                            src={proxiedUrl}
+                                            controls
+                                            style={styles.image as any}
+                                          />
+                                        );
+                                      } else {
+                                        return (
+                                          <View style={styles.imageDisplayContainer}>
+                                            <ThemedText>Video preview not supported on this platform.</ThemedText>
+                                            <ThemedText style={{ color: '#007AFF' }}>{item.url}</ThemedText>
+                                          </View>
+                                        );
+                                      }
+                                    }
+                                    // Image branch
+                                    return (
+                                      imageLoadErrors[item.url] ? (
+                                        <View style={styles.imageErrorContainer}>
+                                          <Ionicons name="image-outline" size={48} color="#ccc" />
+                                          <ThemedText style={styles.imageErrorText}>Image not available</ThemedText>
+                                          <ThemedText style={styles.imageErrorSubtext}>
+                                            {typeof imageLoadErrors[item.url] === 'string' && imageLoadErrors[item.url]}
+                                            {typeof imageLoadErrors[item.url] !== 'string' && '(CORS restricted or failed to load)'}
+                                          </ThemedText>
+                                        </View>
+                                      ) : !imageLoadSuccess[item.url] ? (
+                                        <ImageLoaderWithTimeout
+                                          imageUrl={item.url}
+                                          onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [item.url]: true }))}
+                                          onError={(errMsg) => setImageLoadErrors(prev => ({ ...prev, [item.url]: errMsg || true }))}
+                                        >
+                                          {Platform.OS === 'web' ? (
+                                            <img
+                                              src={proxiedUrl}
+                                              alt="Instagram media"
+                                              style={styles.image as any}
+                                              onError={() => setImageLoadErrors(prev => ({ ...prev, [item.url]: 'Failed to load image' }))}
+                                              onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [item.url]: true }))}
+                                            />
+                                          ) : (
+                                            <Image
+                                              source={{ uri: proxiedUrl }}
+                                              style={styles.image}
+                                              onError={(e) => setImageLoadErrors(prev => ({ ...prev, [item.url]: (e?.nativeEvent?.error || 'Failed to load image') }))}
+                                              onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [item.url]: true }))}
+                                            />
+                                          )}
+                                        </ImageLoaderWithTimeout>
                                       ) : (
-                                        <Image
-                                          source={{
-                                            uri: `https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`
-                                          }}
-                                          style={styles.image}
-                                          onError={(e) => setImageLoadErrors(prev => ({ ...prev, [images[currentImageIndex]]: (e?.nativeEvent?.error || 'Failed to load image') }))}
-                                          onLoad={() => setImageLoadSuccess(prev => ({ ...prev, [images[currentImageIndex]]: true }))}
-                                        />
-                                      )}
-                                    </ImageLoaderWithTimeout>
-                                  ) : (
-                                    <View style={styles.imageDisplayContainer}>
-                                      {Platform.OS === 'web' ? (
-                                        <img
-                                          src={`https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`}
-                                          alt="Instagram post"
-                                          style={styles.image}
-                                        />
-                                      ) : (
-                                        <Image
-                                          source={{
-                                            uri: `https://us-central1-discovery-admin-f87ce.cloudfunctions.net/proxyInstagramImage?imageUrl=${encodeURIComponent(images[currentImageIndex])}`
-                                          }}
-                                          style={styles.image}
-                                        />
-                                      )}
-                                    </View>
-                                  )}
+                                        <View style={styles.imageDisplayContainer}>
+                                          {Platform.OS === 'web' ? (
+                                            <img src={proxiedUrl} alt="Instagram media" style={styles.image as any} />
+                                          ) : (
+                                            <Image source={{ uri: proxiedUrl }} style={styles.image} />
+                                          )}
+                                        </View>
+                                      )
+                                    );
+                                  })()}
                                 </View>
                                 
-                                {/* Image Navigation */}
-                                {images.length > 1 && (
+                                {/* Media Navigation */}
+                                {media.length > 1 && (
                                   <View style={styles.imageNavigation}>
                                     <TouchableOpacity
-                                      onPress={goToPreviousImage}
-                                      disabled={currentImageIndex === 0}
-                                      style={[styles.imageNavButton, currentImageIndex === 0 && styles.disabledButton]}
+                                      onPress={goToPreviousMedia}
+                                      disabled={currentMediaIndex === 0}
+                                      style={[styles.imageNavButton, currentMediaIndex === 0 && styles.disabledButton]}
                                     >
-                                      <Ionicons name="chevron-back" size={20} color={currentImageIndex === 0 ? "#ccc" : "#007AFF"} />
+                                      <Ionicons name="chevron-back" size={20} color={currentMediaIndex === 0 ? "#ccc" : "#007AFF"} />
                                     </TouchableOpacity>
-                                    
-                                    {/* Image Dots */}
+
+                                    {/* Dots */}
                                     <View style={styles.imageDots}>
-                                      {images.map((_, index) => (
+                                      {media.map((_, index) => (
                                         <View
                                           key={index}
-                                          style={[
-                                            styles.dot,
-                                            index === currentImageIndex && styles.activeDot
-                                          ]}
+                                          style={[styles.dot, index === currentMediaIndex && styles.activeDot]}
                                         />
                                       ))}
                                     </View>
                                     
                                     <TouchableOpacity
-                                      onPress={goToNextImage}
-                                      disabled={currentImageIndex === images.length - 1}
-                                      style={[styles.imageNavButton, currentImageIndex === images.length - 1 && styles.disabledButton]}
+                                      onPress={goToNextMedia}
+                                      disabled={currentMediaIndex === media.length - 1}
+                                      style={[styles.imageNavButton, currentMediaIndex === media.length - 1 && styles.disabledButton]}
                                     >
-                                      <Ionicons name="chevron-forward" size={20} color={currentImageIndex === images.length - 1 ? "#ccc" : "#007AFF"} />
+                                      <Ionicons name="chevron-forward" size={20} color={currentMediaIndex === media.length - 1 ? "#ccc" : "#007AFF"} />
                                     </TouchableOpacity>
                                   </View>
                                 )}
                               </View>
                             )}
-
-                            {/* Show post id for debugging */}
-                            <View style={{ alignItems: 'center', marginVertical: 6 }}>
-                              <ThemedText style={{ color: '#888', fontSize: 14 }}>
-                                post id: {currentPost.id || currentPost.shortcode || 'N/A'}
-                              </ThemedText>
-                            </View>
 
                             {/* Post Text */}
                             <View style={styles.postTextContainer}>
@@ -986,46 +1167,7 @@ export default function ScraperScreen() {
         </View>
       </Modal>
 
-      {/* Polling Logs Section */}
-      <ThemedView style={styles.section}>
-        <TouchableOpacity onPress={() => setIsPollingLogsExpanded(v => !v)} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-          <ThemedText type="subtitle" style={{ flex: 1 }}>Polling History (Last 10 Polls)</ThemedText>
-          <ThemedText style={{ color: '#007AFF', fontWeight: 'bold' }}>{isPollingLogsExpanded ? 'Collapse' : 'Expand'}</ThemedText>
-        </TouchableOpacity>
-        {isPollingLogsExpanded && (
-          isLoadingLogs ? (
-            <ActivityIndicator size="small" color="#007AFF" />
-          ) : pollingLogs.length === 0 ? (
-            <ThemedText>No polling logs found.</ThemedText>
-          ) : (
-            pollingLogs.map(log => (
-              <View key={log.id} style={styles.pollLogItem}>
-                <ThemedText style={{ fontWeight: 'bold' }}>{log.timestamp ? new Date(log.timestamp).toLocaleString() : 'Unknown time'}</ThemedText>
-                <ThemedText>Checked: {log.checkedRunIds ? log.checkedRunIds.length : 0}</ThemedText>
-                <ThemedText>Completed: {log.completedRunIds ? log.completedRunIds.length : 0}</ThemedText>
-                <ThemedText>Failed: {log.failedRunIds ? log.failedRunIds.length : 0}</ThemedText>
-                {log.errors && log.errors.length > 0 && (
-                  <ThemedText style={{ color: 'red' }}>Errors: {JSON.stringify(log.errors)}</ThemedText>
-                )}
-                <TouchableOpacity
-                  style={{ marginTop: 6, alignSelf: 'flex-end', backgroundColor: '#ff4444', padding: 6, borderRadius: 6 }}
-                  onPress={() => handleDeletePollLog(log.id)}
-                >
-                  <ThemedText style={{ color: '#fff' }}>Delete</ThemedText>
-                </TouchableOpacity>
-              </View>
-            ))
-          )
-        )}
-        <Button title="Refresh Polling Logs" onPress={fetchPollingLogs} />
-        <View style={{ marginTop: 10 }}>
-          <Button
-            title={isManualPollLoading ? 'Triggering Poll...' : 'Trigger Poll Now'}
-            onPress={handleManualPoll}
-            disabled={isManualPollLoading}
-          />
-        </View>
-      </ThemedView>
+
 
       {/* Live Processing Status and Summary Modal */}
       <Modal
@@ -1109,12 +1251,12 @@ function ImageLoaderWithTimeout({ imageUrl, onLoad, onError, children }: {
     }
     onError && onError(errMsg);
   };
-  // For <img> (web), inject only valid props (onload/onerror, cast as any)
-  if (Platform.OS === 'web' && children.type === 'img') {
-    return React.cloneElement(children as React.ReactElement<HTMLImageElement>, {
-      onload: handleLoad as any,
-      onerror: handleError as any,
-    });
+  // For <img> (web), inject only valid props (camelCase), cast to any to satisfy TS
+  if (Platform.OS === 'web' && (children as any).type === 'img') {
+    return React.cloneElement(children as any, {
+      onLoad: handleLoad,
+      onError: handleError,
+    } as any);
   }
   // For <Image> (native), inject only valid props
   if (Platform.OS !== 'web' && typeof children.type === 'function' && children.type.name === 'Image') {
@@ -1447,5 +1589,11 @@ const styles = StyleSheet.create({
   errorMessage: {
     fontSize: 14,
     color: 'red',
+  },
+  emptyStateText: {
+    fontSize: 16,
+    color: '#666',
+    textAlign: 'center',
+    fontStyle: 'italic',
   },
 });

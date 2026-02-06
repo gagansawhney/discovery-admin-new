@@ -1,17 +1,24 @@
-import { Stack } from 'expo-router';
+import { ThemedView } from '@/components/ThemedView';
+import { Slot } from 'expo-router';
 import React from 'react';
+import { StyleSheet, View } from 'react-native';
 
-export default function EventsTabLayout() {
+export default function EventsLayout() {
   return (
-    <Stack
-      screenOptions={{
-        headerShown: false,
-      }}
-      initialRouteName="upload">
-      <Stack.Screen name="upload" />
-      
-      <Stack.Screen name="list" />
-      <Stack.Screen name="scraper" />
-    </Stack>
+    <ThemedView style={styles.page}>
+      <View style={styles.content}>
+        <Slot />
+      </View>
+    </ThemedView>
   );
-} 
+}
+
+const styles = StyleSheet.create({
+  page: {
+    flex: 1,
+  },
+  content: {
+    flex: 1,
+    minWidth: 0,
+  },
+}); 

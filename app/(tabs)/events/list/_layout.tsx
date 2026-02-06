@@ -1,15 +1,18 @@
-import { Stack } from 'expo-router';
+import { ThemedView } from '@/components/ThemedView';
+import { Slot } from 'expo-router';
 import React from 'react';
+import { StyleSheet } from 'react-native';
 
-export default function EventListTabLayout() {
+export default function EventListLayout() {
   return (
-    <Stack
-      screenOptions={{
-        headerShown: false,
-      }}
-      initialRouteName="upcoming">
-      <Stack.Screen name="upcoming" />
-      <Stack.Screen name="past" />
-    </Stack>
+    <ThemedView style={styles.wrapper}>
+      <Slot />
+    </ThemedView>
   );
-} 
+}
+
+const styles = StyleSheet.create({
+  wrapper: {
+    flex: 1,
+  },
+}); 
