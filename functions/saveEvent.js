@@ -2,9 +2,28 @@ const functions = require('firebase-functions');
 const express = require('express');
 const cors = require('cors');
 const logger = require('firebase-functions/logger');
-const { externalDb } = require('./firebase');
+const { admin, externalDb } = require('./firebase');
 const OpenAI = require('openai');
-const { FieldValue } = require('@google-cloud/firestore');
+const stringSimilarity = require('string-similarity');
+
+const FieldValue = admin.firestore.FieldValue;
+
+// Fuzzy matching threshold (0.0 - 1.0): higher = stricter matching
+const FUZZY_MATCH_THRESHOLD = 0.6;
+
+// Helper function to calculate similarity between two strings
+function getSimilarity(str1, str2) {
+  const s1 = str1.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  const s2 = str2.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  
+  // Exact match after cleaning
+  if (s1 === s2) return 1.0;
+  
+  return stringSimilarity.compareTwoStrings(
+    str1.trim().toLowerCase(),
+    str2.trim().toLowerCase()
+  );
+}
 
 // Helper function to lookup venue in venues collection
 async function lookupVenue(venueName) {
@@ -18,7 +37,7 @@ async function lookupVenue(venueName) {
 
     const normalizedVenueName = venueName.trim().toLowerCase();
 
-    // First, try exact match on venue name
+    // Step 1: Try exact match on venue name
     let venueSnapshot = await externalDb.collection('venues')
       .where('name', '==', venueName.trim())
       .limit(1)
@@ -30,7 +49,8 @@ async function lookupVenue(venueName) {
       logger.info(`--- lookupVenue: Found exact match ---`, {
         venueName,
         venueId: venueDoc.id,
-        canonicalName: venueData.name
+        canonicalName: venueData.name,
+        matchType: 'exact'
       });
       return {
         id: venueDoc.id,
@@ -38,7 +58,7 @@ async function lookupVenue(venueName) {
       };
     }
 
-    // If no exact match, check name variations
+    // Step 2: Check name variations (exact match)
     const allVenuesSnapshot = await externalDb.collection('venues').get();
 
     for (const doc of allVenuesSnapshot.docs) {
@@ -55,7 +75,8 @@ async function lookupVenue(venueName) {
           venueName,
           venueId: doc.id,
           canonicalName: venueData.name,
-          matchedVariation: nameVariations.find(v => v.toLowerCase() === normalizedVenueName)
+          matchedVariation: nameVariations.find(v => v.toLowerCase() === normalizedVenueName),
+          matchType: 'variation_exact'
         });
         return {
           id: doc.id,
@@ -64,7 +85,53 @@ async function lookupVenue(venueName) {
       }
     }
 
-    logger.warn(`--- lookupVenue: No venue found ---`, { venueName });
+    // Step 3: Fuzzy matching on canonical names and variations
+    logger.info(`--- lookupVenue: Starting fuzzy matching ---`, { venueName, threshold: FUZZY_MATCH_THRESHOLD });
+    
+    let bestMatch = null;
+    let bestSimilarity = 0;
+    let matchType = null;
+
+    for (const doc of allVenuesSnapshot.docs) {
+      const venueData = doc.data();
+      
+      // Check fuzzy match against canonical name
+      const canonicalSimilarity = getSimilarity(venueName, venueData.name);
+      if (canonicalSimilarity > bestSimilarity) {
+        bestSimilarity = canonicalSimilarity;
+        bestMatch = { id: doc.id, ...venueData };
+        matchType = 'fuzzy_canonical';
+      }
+
+      // Check fuzzy match against variations
+      const nameVariations = venueData.nameVariations || [];
+      for (const variation of nameVariations) {
+        const variationSimilarity = getSimilarity(venueName, variation);
+        if (variationSimilarity > bestSimilarity) {
+          bestSimilarity = variationSimilarity;
+          bestMatch = { id: doc.id, ...venueData };
+          matchType = 'fuzzy_variation';
+        }
+      }
+    }
+
+    if (bestMatch && bestSimilarity >= FUZZY_MATCH_THRESHOLD) {
+      logger.info(`--- lookupVenue: Found fuzzy match ---`, {
+        venueName,
+        venueId: bestMatch.id,
+        canonicalName: bestMatch.name,
+        similarity: bestSimilarity,
+        matchType,
+        threshold: FUZZY_MATCH_THRESHOLD
+      });
+      return bestMatch;
+    }
+
+    logger.warn(`--- lookupVenue: No venue found (fuzzy matching failed) ---`, { 
+      venueName, 
+      bestSimilarity: bestMatch ? bestSimilarity : 0,
+      threshold: FUZZY_MATCH_THRESHOLD
+    });
     return null;
   } catch (error) {
     logger.error(`--- lookupVenue: Error looking up venue ---`, { venueName, error: error.message });
@@ -85,23 +152,39 @@ app.post('/', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Event data and ID are required' });
     }
 
-    // Validate venue exists in venues collection
-    if (!eventData.venue || !eventData.venue.name) {
-      return res.status(400).json({ success: false, error: 'Event must have a venue name' });
-    }
+    let venueData = null;
 
-    // Lookup venue in venues collection
-    const venueData = await lookupVenue(eventData.venue.name);
-    if (!venueData) {
-      return res.status(400).json({
-        success: false,
-        error: `Venue not found in venues collection: "${eventData.venue.name}". Please add this venue first.`
-      });
+    if (eventData.forceVenueId) {
+      logger.info('Using forced venue ID', { forceVenueId: eventData.forceVenueId });
+      const venueDoc = await externalDb.collection('venues').doc(eventData.forceVenueId).get();
+      if (!venueDoc.exists) {
+        return res.status(400).json({ success: false, error: `Forced venue ID not found: ${eventData.forceVenueId}` });
+      }
+      venueData = { id: venueDoc.id, ...venueDoc.data() };
+    } else {
+      // Standardize venue structure: support { venue: { name: '...' } } or { venueName: '...' }
+      let venueName = eventData.venue?.name || eventData.venueName || eventData.venue;
+      
+      // If venue is still not a string, check if AI returned it as a flat field 'venue.name'
+      if (typeof venueName !== 'string' && eventData['venue.name']) {
+        venueName = eventData['venue.name'];
+      }
+
+      if (!venueName || typeof venueName !== 'string' || !venueName.trim()) {
+        return res.status(400).json({ success: false, error: 'Event must have a venue name' });
+      }
+
+      // Lookup venue in venues collection
+      venueData = await lookupVenue(venueName);
+      if (!venueData) {
+        return res.status(400).json({
+          success: false,
+          error: `Venue not found in venues collection: "${venueName}". Please add this venue first.`
+        });
+      }
     }
 
     logger.info('Venue validated for manual event save', {
-      originalVenueName: eventData.venue.name,
-      canonicalVenueName: venueData.name,
       venueId: venueData.id
     });
 
@@ -110,18 +193,23 @@ app.post('/', async (req, res) => {
       name: venueData.name,
       address: venueData.address,
       geo: {
-        lat: venueData.latitude,
-        lon: venueData.longitude
+        lat: venueData.latitude || venueData.geo?.lat,
+        lon: venueData.longitude || venueData.geo?.lon
       }
     };
 
     // Update event data with canonical venue
     const updatedEventData = {
       ...eventData,
-      title: eventData.title ? eventData.title.replace(/\b\w/g, l => l.toUpperCase()) : eventData.title, // Auto-capitalize title
       venue: canonicalVenue,
       venueId: venueData.id // Link to venue document
     };
+
+    // Auto-capitalize title if present, or use capitalized name as title
+    const sourceTitle = eventData.title || eventData.name;
+    if (sourceTitle) {
+      updatedEventData.title = sourceTitle.replace(/\b\w/g, l => l.toUpperCase());
+    }
 
     // Generate embedding for searchText
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.trim() : undefined;
@@ -163,7 +251,7 @@ app.post('/', async (req, res) => {
     });
   } catch (error) {
     logger.error('Error saving event', { error: error.message, stack: error.stack });
-    res.status(500).json({ success: false, error: 'Failed to save event', details: error.message });
+    res.status(500).json({ success: false, error: `Failed to save event: ${error.message}` });
   }
 });
 

@@ -1,11 +1,12 @@
 const functions = require('firebase-functions');
-const { externalDb, bucket } = require('./firebase');
+const { admin, externalDb, bucket } = require('./firebase');
 const logger = require('firebase-functions/logger');
 const cors = require('cors')({ origin: true, credentials: true });
 const fetch = require('node-fetch');
 const { v4: uuidv4 } = require('uuid');
 const OpenAI = require('openai');
-const { FieldValue } = require('@google-cloud/firestore');
+
+const FieldValue = admin.firestore.FieldValue;
 
 // Helper function to process a single accepted post
 async function processAcceptedPost(post, originalIndex, results) {
@@ -150,19 +151,42 @@ async function processAcceptedPost(post, originalIndex, results) {
   }
 }
 
-// Helper function to get the best image URL from a post
 function getBestImageUrl(post) {
-  // Priority: displayUrl > thumbnailUrl > first image from images array
-  if (post.displayUrl) {
-    return post.displayUrl;
+  // 1. If it's a video, we MUST use the thumbnail for AI vision
+  if (post.mediaType === 'video' || post.isVideo === true) {
+    const thumb = post.thumbnailUrl || post.thumbnail;
+    if (typeof thumb === 'string') return thumb;
   }
-  if (post.thumbnailUrl) {
-    return post.thumbnailUrl;
+
+  // 2. Try the standard Instagram large media endpoint
+  const shortcode = post.shortcode || post.shortCode || post.code || null;
+  if (typeof shortcode === 'string' && shortcode.length > 0 && !post.mediaUrl?.includes('.mp4')) {
+    return `https://www.instagram.com/p/${shortcode}/media/?size=l`;
   }
-  if (post.images && Array.isArray(post.images) && post.images.length > 0) {
-    return post.images[0].url;
+
+  // 3. Fallback chain for images
+  if (Array.isArray(post.images) && post.images.length > 0) {
+    const url = post.images[0]?.url || post.images[0];
+    if (typeof url === 'string') return url;
   }
-  return null;
+  
+  const chain = [
+    post.displayUrl,
+    post.thumbnailUrl,
+    post.thumbnail,
+    post.mediaUrl,
+    post.media,
+    post.url,
+    post.image
+  ];
+
+  for (const url of chain) {
+    if (typeof url === 'string' && url.length > 0 && !url.includes('.mp4')) {
+      return url;
+    }
+  }
+
+  return post.thumbnailUrl || post.thumbnail || null;
 }
 
 // Helper function to download image from Instagram
@@ -329,6 +353,12 @@ async function saveEventToFirestore(eventData, post) {
       },
       updatedAt: new Date().toISOString()
     };
+
+    // Ensure title exists and is capitalized
+    const sourceTitle = eventWithSource.title || eventWithSource.name;
+    if (sourceTitle) {
+      eventWithSource.title = sourceTitle.replace(/\b\w/g, l => l.toUpperCase());
+    }
 
     // Generate unique ID if not provided
     if (!eventWithSource.id) {

@@ -57,6 +57,7 @@ export default function UpcomingEventsScreen() {
   const [eventToDelete, setEventToDelete] = useState<{ id: string; name: string } | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [groupedEvents, setGroupedEvents] = useState<GroupedEvents[]>([]);
+  const [groupingType, setGroupingType] = useState<'date' | 'venue'>('date');
   const colorScheme = useColorScheme() || 'light';
 
   // Calculate ongoing and upcoming counts
@@ -134,27 +135,74 @@ export default function UpcomingEventsScreen() {
     
     return sortedGroups;
   };
+  // Group events by venue
+  const groupEventsByVenue = (eventList: Event[]) => {
+    const grouped: { [key: string]: Event[] } = {};
+    
+    eventList.forEach(event => {
+      const venueKey = event.venue.name || 'Unknown Venue';
+      
+      if (!grouped[venueKey]) {
+        grouped[venueKey] = [];
+      }
+      grouped[venueKey].push(event);
+    });
+    
+    // Convert to array and sort by venue name
+    const sortedGroups = Object.entries(grouped)
+      .map(([venueName, events]) => {
+        // Calculate ongoing and upcoming counts for this venue
+        const now = new Date();
+        const ongoingEvents = events.filter(event => {
+          const startDate = new Date(event.date.start);
+          const endDate = event.date.end ? new Date(event.date.end) : new Date(event.date.start);
+          return startDate <= now && endDate > now;
+        });
+        
+        const upcomingEvents = events.filter(event => {
+          const startDate = new Date(event.date.start);
+          return startDate > now;
+        });
+        
+        return {
+          date: venueName, // Using 'date' field for consistency, but it's actually venue name
+          dateLabel: venueName,
+          events: events.sort((a, b) => new Date(a.date.start).getTime() - new Date(b.date.start).getTime()),
+          isExpanded: false,
+          ongoingCount: ongoingEvents.length,
+          upcomingCount: upcomingEvents.length
+        };
+      })
+      .sort((a, b) => a.dateLabel.localeCompare(b.dateLabel));
+    
+    return sortedGroups;
+  };
+
 
   useEffect(() => {
     fetchEvents();
   }, []);
 
   useEffect(() => {
-    const grouped = groupEventsByDate(events);
+    const grouped = groupingType === 'date' ? groupEventsByDate(events) : groupEventsByVenue(events);
     setGroupedEvents(grouped);
-  }, [events]);
+  }, [events, groupingType]);
 
   const fetchEvents = async () => {
     try {
       setLoading(true);
       setError(null);
       
-      const response = await fetch('https://us-central1-discovery-admin-f87ce.cloudfunctions.net/fetchEvents', {
+      const response = await fetch('https://us-central1-discovery-admin-f87ce.cloudfunctions.net/fetchEvents?t=' + Date.now(), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0',
         },
-        body: JSON.stringify({ type: 'upcoming' }),
+        body: JSON.stringify({ type: 'upcoming', timestamp: Date.now() }),
+        cache: 'no-store',
       });
 
       const data = await response.json();
@@ -183,12 +231,15 @@ export default function UpcomingEventsScreen() {
     
     setDeleteLoading(true);
     try {
-      const response = await fetch('https://us-central1-discovery-admin-f87ce.cloudfunctions.net/deleteEvent', {
+      const response = await fetch('https://us-central1-discovery-admin-f87ce.cloudfunctions.net/deleteEvent?t=' + Date.now(), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
         },
-        body: JSON.stringify({ eventId: eventToDelete.id }),
+        body: JSON.stringify({ eventId: eventToDelete.id, timestamp: Date.now() }),
+        cache: 'no-store',
       });
 
       const data = await response.json();
@@ -391,6 +442,22 @@ export default function UpcomingEventsScreen() {
         <Text style={[styles.countText, { color: Colors[colorScheme].text }]}>
           Upcoming Events: {upcomingEvents.length}
         </Text>
+      </View>
+
+      {/* Grouping Toggle */}
+      <View style={styles.groupingToggle}>
+        <TouchableOpacity
+          style={[styles.toggleButton, groupingType === 'date' && styles.toggleButtonActive]}
+          onPress={() => setGroupingType('date')}
+        >
+          <Text style={[styles.toggleButtonText, groupingType === 'date' && styles.toggleButtonTextActive]}>By Date</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.toggleButton, groupingType === 'venue' && styles.toggleButtonActive]}
+          onPress={() => setGroupingType('venue')}
+        >
+          <Text style={[styles.toggleButtonText, groupingType === 'venue' && styles.toggleButtonTextActive]}>By Venue</Text>
+        </TouchableOpacity>
       </View>
       
       <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
@@ -696,5 +763,34 @@ const styles = StyleSheet.create({
   countText: {
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  groupingToggle: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#f5f5f5',
+  },
+  toggleButton: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  toggleButtonActive: {
+    backgroundColor: '#FF6B35',
+    borderColor: '#FF6B35',
+  },
+  toggleButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#666',
+  },
+  toggleButtonTextActive: {
+    color: '#fff',
   },
 }); 

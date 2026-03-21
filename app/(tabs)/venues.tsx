@@ -4,6 +4,10 @@ import { Ionicons } from '@expo/vector-icons';
 import AddLocationAltIcon from '@mui/icons-material/AddLocationAlt';
 import DownloadIcon from '@mui/icons-material/Download';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import EditIcon from '@mui/icons-material/Edit';
+import DeleteIcon from '@mui/icons-material/Delete';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { IconButton, Button as MUIButton, Tooltip } from '@mui/material';
 import * as FileSystem from 'expo-file-system';
 import { router, useGlobalSearchParams } from 'expo-router';
@@ -116,6 +120,8 @@ export default function VenuesScreen() {
   const isAddMode = mode === 'add';
   const isBulkMode = mode === 'bulk';
   
+  console.log('--- VENUES SCREEN RENDER V3.2 ---', { venuesCount: venues.length, expandedCount: expandedVenues.size });
+
   // Confirmation modal state
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [venueToDelete, setVenueToDelete] = useState<Venue | null>(null);
@@ -675,7 +681,34 @@ export default function VenuesScreen() {
     });
   };
 
-
+  const handleExportVenues = async () => {
+    try {
+      const rows = [['Venue Name'], ...sortedVenues.map(v => [v.name])];
+      if (typeof window !== 'undefined' && XLSX) {
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Venues');
+        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        const blob = new Blob([wbout], { type: 'application/octet-stream' });
+        const url = window.URL.createObjectURL(blob);
+        const a_el = document.createElement('a');
+        a_el.href = url;
+        a_el.download = 'venues.xlsx';
+        document.body.appendChild(a_el);
+        a_el.click();
+        setTimeout(() => {
+          document.body.removeChild(a_el);
+          window.URL.revokeObjectURL(url);
+        }, 100);
+        Alert.alert('Success', 'Venues exported to Excel!');
+      } else {
+        const csv = rows.map(r => r.join(',')).join('\n');
+        const fileUri = FileSystem.cacheDirectory + 'venues.csv';
+        await FileSystem.writeAsStringAsync(fileUri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+        await Sharing.shareAsync(fileUri, { mimeType: 'text/csv', dialogTitle: 'Export Venues' });
+      }
+    } catch (e) { Alert.alert('Error', 'Failed to export venues.'); }
+  };
 
   const renderVenue = ({ item }: { item: Venue }) => {
     const isExpanded = expandedVenues.has(item.id);
@@ -685,17 +718,20 @@ export default function VenuesScreen() {
     return (
       <ThemedView style={styles.venueItem}>
         <TouchableOpacity style={styles.venueHeaderCompact} onPress={() => toggleVenueExpansion(item.id)}>
-          <ThemedText style={styles.venueName} numberOfLines={1}>
-            {item.name}
-          </ThemedText>
-          <Ionicons 
-            name={isExpanded ? 'chevron-up' : 'chevron-down'} 
-            size={18} 
-            color="#007AFF" 
-          />
+          <View style={{ flex: 1 }}>
+            <ThemedText style={styles.venueName} numberOfLines={1}>
+              {item.name}
+            </ThemedText>
+            {hasNameVariations && (
+              <View style={[styles.nameVariationsInline, { backgroundColor: '#f0f4f8', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, alignSelf: 'flex-start', marginTop: 2 }]}>
+                <ThemedText style={[styles.nameVariationInline, { color: '#4a5568', fontSize: 11 }]}>
+                  Aliases: {item.nameVariations.join(', ')}
+                </ThemedText>
+              </View>
+            )}
+          </View>
+          {isExpanded ? <ExpandLessIcon style={{ color: '#007AFF' }} /> : <ExpandMoreIcon style={{ color: '#007AFF' }} />}
         </TouchableOpacity>
-        
-        {/* Collapsible Content Toggle handled by header */}
         
         {/* Collapsible Content */}
         {isExpanded && (
@@ -703,7 +739,7 @@ export default function VenuesScreen() {
             {/* Actions moved to expanded area */}
             <View style={[styles.venueActions, { marginBottom: 8 }]}>
               <TouchableOpacity onPress={() => openEditModal(item)} style={styles.actionButton}>
-                <Ionicons name="pencil" size={20} color="#007AFF" />
+                <EditIcon style={{ color: '#007AFF', fontSize: 20 }} />
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => {
@@ -712,26 +748,12 @@ export default function VenuesScreen() {
                 }}
                 style={styles.actionButton}
               >
-                <Ionicons name="trash" size={20} color="#ff4444" />
+                <DeleteIcon style={{ color: '#ff4444', fontSize: 20 }} />
               </TouchableOpacity>
             </View>
 
             {/* Basic Info */}
             <View style={styles.venueInfo}>
-              {/* Name Variations */}
-              {hasNameVariations && (
-                <View style={styles.nameVariationsInline}>
-                  <ThemedText style={styles.nameVariationsLabel}>Also known as: </ThemedText>
-                  <View style={styles.nameVariationsListInline}>
-                    {item.nameVariations.map((variation, index) => (
-                      <ThemedText key={index} style={styles.nameVariationInline}>
-                        {variation}{index < item.nameVariations.length - 1 ? ', ' : ''}
-                      </ThemedText>
-                    ))}
-                  </View>
-                </View>
-              )}
-
               <ThemedText style={styles.venueAddress}>{item.address}</ThemedText>
               {item.contactNumber && (
                 <ThemedText style={styles.venueContact}>📞 {item.contactNumber}</ThemedText>
@@ -846,88 +868,62 @@ export default function VenuesScreen() {
     );
   };
 
-  // Export venues to Excel/CSV
-  const handleExportVenues = async () => {
-    try {
-      const names = venues.map(v => v.name);
-      const header = ['Venue Name'];
-      const rows = [header, ...names.map(name => [name])];
-      if (typeof window !== 'undefined' && XLSX) {
-        // Web: Use SheetJS to create and download xlsx
-        const ws = XLSX.utils.aoa_to_sheet(rows);
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, 'Venues');
-        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-        const blob = new Blob([wbout], { type: 'application/octet-stream' });
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'venues.xlsx';
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          document.body.removeChild(a);
-          window.URL.revokeObjectURL(url);
-        }, 100);
-        Alert.alert('Success', 'Venues exported to Excel!');
-      } else {
-        // Native: Export as CSV and share
-        const csv = rows.map(r => r.join(',')).join('\n');
-        const fileUri = FileSystem.cacheDirectory + 'venues.csv';
-        await FileSystem.writeAsStringAsync(fileUri, csv, { encoding: FileSystem.EncodingType.UTF8 });
-        await Sharing.shareAsync(fileUri, { mimeType: 'text/csv', dialogTitle: 'Export Venues' });
-      }
-    } catch (e) {
-      Alert.alert('Error', 'Failed to export venues.');
-    }
-  };
-
   return (
-    <ScrollView style={styles.container}>
-      <ThemedView style={styles.header}>
-        <ThemedText type="title">Venues</ThemedText>
-        <View style={styles.venuesHeaderButtonsRight}>
-          {(!isViewMode && !isBulkMode) && (
-            <MUIButton variant="contained" size="small" startIcon={<AddLocationAltIcon />} onClick={openAddModal}>Add Venue</MUIButton>
-          )}
-          <MUIButton variant="outlined" size="small" startIcon={<DownloadIcon />} onClick={handleExportVenues}>Export to Excel</MUIButton>
-          <Tooltip title="Refresh venues">
-            <IconButton color="primary" size="small" onClick={() => { loadVenues(); }}>
-              <RefreshIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        </View>
-      </ThemedView>
+    <ThemedView style={[styles.container, { height: '100%' }]}>
+      <FlatList
+        data={isBulkMode ? [] : sortedVenues}
+        keyExtractor={item => item.id}
+        renderItem={renderVenue}
+        ListHeaderComponent={
+          <>
+            <ThemedView style={styles.header}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <ThemedText type="title">Venues</ThemedText>
+                <ThemedText style={{ fontSize: 10, color: '#999', marginTop: 8 }}>V3.2</ThemedText>
+              </View>
+              <View style={styles.venuesHeaderButtonsRight}>
+                {(!isViewMode && !isBulkMode) && (
+                  <MUIButton variant="contained" size="small" startIcon={<AddLocationAltIcon />} onClick={openAddModal}>Add Venue</MUIButton>
+                )}
+                <MUIButton variant="outlined" size="small" startIcon={<DownloadIcon />} onClick={handleExportVenues}>Export to Excel</MUIButton>
+                <Tooltip title="Refresh venues">
+                  <IconButton color="primary" size="small" onClick={() => { loadVenues(); }}>
+                    <RefreshIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </View>
+            </ThemedView>
 
-      {!isBulkMode && (
-        <ThemedView style={styles.countContainer}>
-          <ThemedText style={styles.countText}>
-            Total Venues: {venues.length}
-          </ThemedText>
-        </ThemedView>
-      )}
+            {!isBulkMode && (
+              <ThemedView style={styles.countContainer}>
+                <ThemedText style={styles.countText}>
+                  Total Venues: {venues.length}
+                </ThemedText>
+              </ThemedView>
+            )}
 
-      {isBulkMode ? (
-        <ThemedView style={{ margin: 16, padding: 16, borderRadius: 8, borderWidth: 1, borderColor: '#eee' }}>
-          <ThemedText>Bulk Add (coming soon)</ThemedText>
-        </ThemedView>
-      ) : isLoading ? (
-        <ThemedView style={styles.loadingContainer}>
-          <ThemedText>Loading venues...</ThemedText>
-        </ThemedView>
-      ) : venues.length === 0 ? (
-        <ThemedView style={styles.emptyState}>
-          <Ionicons name="location-outline" size={40} color="#888" />
-          <ThemedText style={styles.emptyText}>No venues found. Add your first venue!</ThemedText>
-        </ThemedView>
-      ) : (
-        <FlatList
-          data={sortedVenues}
-          renderItem={renderVenue}
-          keyExtractor={item => item.id}
-          scrollEnabled={false}
-        />
-      )}
+            {isBulkMode && (
+              <ThemedView style={{ margin: 16, padding: 16, borderRadius: 8, borderWidth: 1, borderColor: '#eee' }}>
+                <ThemedText>Bulk Add (coming soon)</ThemedText>
+              </ThemedView>
+            )}
+
+            {isLoading && (
+              <ThemedView style={styles.loadingContainer}>
+                <ThemedText>Loading venues...</ThemedText>
+              </ThemedView>
+            )}
+
+            {!isLoading && !isBulkMode && venues.length === 0 && (
+              <ThemedView style={styles.emptyState}>
+                <Ionicons name="location-outline" size={40} color="#888" />
+                <ThemedText style={styles.emptyText}>No venues found. Add your first venue!</ThemedText>
+              </ThemedView>
+            )}
+          </>
+        }
+        contentContainerStyle={{ paddingBottom: 40 }}
+      />
 
       {/* Add/Edit Venue Modal */}
       <Modal
@@ -1193,7 +1189,7 @@ export default function VenuesScreen() {
           </View>
         </View>
       </Modal>
-    </ScrollView>
+    </ThemedView>
   );
 }
 
@@ -1202,7 +1198,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   header: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
   },
@@ -1234,8 +1231,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   venueItem: {
-    margin: 16,
-    padding: 16,
+    marginHorizontal: 16,
+    marginVertical: 4,
+    padding: 12,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#eee',
@@ -1243,7 +1241,6 @@ const styles = StyleSheet.create({
   venueHeaderCompact: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
     paddingBottom: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
@@ -1316,27 +1313,27 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
   openingHoursContainer: {
-    marginTop: 12,
-    paddingTop: 12,
+    marginTop: 8,
+    paddingTop: 8,
     borderTopWidth: 1,
     borderTopColor: '#eee',
   },
   openingHoursLabel: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
-    marginBottom: 8,
+    marginBottom: 4,
   },
   dayRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 2,
+    marginBottom: 1,
   },
   dayName: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '500',
   },
   dayHours: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#666',
   },
   modalContainer: {
@@ -1466,42 +1463,42 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   expandedContent: {
-    paddingTop: 12,
+    paddingTop: 8,
     borderTopWidth: 1,
     borderTopColor: '#eee',
   },
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 4,
+    marginBottom: 2,
   },
   infoLabel: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
   },
   infoValue: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#666',
   },
   photosContainer: {
-    marginTop: 12,
-    paddingTop: 12,
+    marginTop: 8,
+    paddingTop: 8,
     borderTopWidth: 1,
     borderTopColor: '#eee',
   },
   photosLabel: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
-    marginBottom: 4,
+    marginBottom: 2,
   },
   photosScroll: {
-    padding: 8,
+    padding: 4,
   },
   photoItem: {
     marginRight: 8,
   },
   photoUrl: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#666',
   },
   clickableText: {
@@ -1558,7 +1555,8 @@ const styles = StyleSheet.create({
     color: '#666',
   },
   countContainer: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
   },
@@ -1566,4 +1564,4 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
   },
-}); 
+});

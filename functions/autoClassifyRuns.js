@@ -2,8 +2,7 @@ const { onSchedule } = require("firebase-functions/v2/scheduler");
 const functions = require('firebase-functions');
 const { externalDb } = require('./firebase');
 const logger = require('firebase-functions/logger');
-const { classifyRunItems } = require('./classifyApifyRun');
-const { processClassifiedRunInternal } = require('./processClassifiedRun');
+const { unifiedProcessRunInternal } = require('./processClassifiedRun');
 
 const autoClassifyLogic = async () => {
     const logs = [];
@@ -82,19 +81,18 @@ async function processRun(doc, log, logError) {
     await doc.ref.update({ classificationStatus: 'IN_PROGRESS', classificationStartedAt: new Date().toISOString() });
 
     try {
-        log(`Starting classification for ${runId}`);
-        const classifyResult = await classifyRunItems(runId, {});
-
-        log(`Starting processing for ${runId}`);
-        const processResult = await processClassifiedRunInternal(runId, {});
+        log(`Starting unified processing for ${runId}`);
+        // Stories default to Gemini 3 (Gemini 2.0 Flash in code), Posts default to GPT-5.2
+        const model = run.type === 'stories' ? 'gemini' : 'gpt-5.2';
+        const result = await unifiedProcessRunInternal(runId, { model });
 
         await doc.ref.update({
             classificationStatus: 'COMPLETED',
             classificationCompletedAt: new Date().toISOString(),
-            processingStats: processResult
+            processingStats: result
         });
 
-        log(`Finished ${runId}`, { classifyResult, processResult });
+        log(`Finished ${runId}`, { result });
 
     } catch (error) {
         logError(`Error processing ${runId}`, { error: error.message });
@@ -107,12 +105,12 @@ async function processRun(doc, log, logError) {
 }
 
 // Scheduled function
-exports.scheduledClassifyRuns = onSchedule({ schedule: "every 5 minutes", timeoutSeconds: 540, secrets: ["OPENAI_API_KEY"] }, async (event) => {
+exports.scheduledClassifyRuns = onSchedule({ schedule: "every 5 minutes", timeoutSeconds: 540, secrets: ["OPENAI_API_KEY", "GEMINI_API_KEY"] }, async (event) => {
     await autoClassifyLogic();
 });
 
 // Manual HTTP function for debugging
-exports.manualAutoClassify = functions.https.onRequest({ invoker: 'public', secrets: ["OPENAI_API_KEY"] }, async (req, res) => {
+exports.manualAutoClassify = functions.https.onRequest({ invoker: 'public', secrets: ["OPENAI_API_KEY", "GEMINI_API_KEY"] }, async (req, res) => {
     const logs = await autoClassifyLogic();
     res.json({ success: true, logs });
 });

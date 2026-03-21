@@ -1,14 +1,16 @@
 const functions = require('firebase-functions');
 const { db, bucket, externalDb } = require('./firebase');
 const logger = require('firebase-functions/logger');
-
-
-
+const fetch = require('node-fetch');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { checkVen } = require('./checkVen');
 const OpenAI = require('openai');
 
-exports.extractFlyerInfo = functions.https.onRequest({ invoker: 'public', secrets: ["OPENAI_API_KEY"], timeoutSeconds: 540 }, async (req, res) => {
+exports.extractFlyerInfo = functions.https.onRequest({ invoker: 'public', secrets: ["OPENAI_API_KEY", "GEMINI_API_KEY"], timeoutSeconds: 540 }, async (req, res) => {
   logger.info('--- extractFlyerInfo: Function started ---');
+  
+  // Model preference: 'openai' or 'gemini'
+  const modelPreference = req.body.model || 'openai';
 
   // Set CORS headers
   res.set('Access-Control-Allow-Origin', '*');
@@ -24,21 +26,14 @@ exports.extractFlyerInfo = functions.https.onRequest({ invoker: 'public', secret
 
   try {
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.trim() : undefined;
-    // Check if OpenAI API key is available
-    if (!OPENAI_API_KEY) {
-      logger.error('extractFlyerInfo error: OpenAI API key not configured');
-      res.status(500).json({ error: 'OpenAI API key not configured. Please contact administrator.' });
-      return;
-    }
-    logger.info('--- extractFlyerInfo: OpenAI API key is present ---');
-
-    const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-    logger.info('extractFlyerInfo called', { method: req.method, headers: req.headers, body: req.body });
+    const GEMINI_API_KEY = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : undefined;
+    
+    logger.info('extractFlyerInfo called', { method: req.method, body: req.body, modelPreference });
+    
     if (req.method !== 'POST') {
       res.status(405).send('Method Not Allowed');
       return;
     }
-    logger.info('--- extractFlyerInfo: Request method is POST ---');
 
     const { path, context } = req.body;
     if (!path) {
@@ -46,13 +41,10 @@ exports.extractFlyerInfo = functions.https.onRequest({ invoker: 'public', secret
       res.status(400).json({ error: 'Missing storage path' });
       return;
     }
-    logger.info('--- extractFlyerInfo: Storage path received ---', { path, context });
 
     // Use default storage bucket
     const file = bucket.file(path);
-    logger.info('--- extractFlyerInfo: Attempting file download ---');
-    await file.download(); // Download to ensure file exists, but we don't need the buffer
-    logger.info('--- extractFlyerInfo: File downloaded ---');
+    await file.download(); 
 
     const expiresAt = Date.now() + 60 * 60 * 1000;
     const [imageUrl] = await file.getSignedUrl({
@@ -60,20 +52,15 @@ exports.extractFlyerInfo = functions.https.onRequest({ invoker: 'public', secret
       action: 'read',
       expires: expiresAt,
     });
-    logger.info('--- extractFlyerInfo: Signed URL generated ---', { imageUrl });
 
-    // Build system and user messages for OpenAI
-    logger.info('--- extractFlyerInfo: Building system and user messages ---');
-    const systemMessage = {
-      role: "system",
-      content: `YOU ARE: an event-extraction assistant.  
+    const systemPrompt = `YOU ARE: an event-extraction assistant.  
 GOAL: return ONE JSON object that my database can ingest.
 
 ──────── MANDATORY FIELDS ────────
 id            string   unique (UUID/hash/slug)
 name          string   clear human title (OK to fabricate)
 date.start    ISO-8601 Asia/Kolkata
-venue.name    string
+venue         object   { name: string }
 searchText    string   lower-case "bag of words" (see rules)
 
 ──────── OPTIONAL FIELDS ─────────
@@ -85,106 +72,73 @@ tags                    array of tag words (see rules)
 rawText                 full OCR text (can be long)
 source                  {platform, postId, url, scrapedAt}
 updatedAt               ISO-8601 timestamp now
-…anything else you can see (music, ageLimit, etc.) may be included but may also be omitted.
 
 ──────── DATE RULES ────────
 * Assume current year is 2025 unless the flyer shows another year.
-* "June 28" → "2025-06-28"; "Dec 15" → "2025-12-15".
-* If only a time ("9pm") appears, combine it with today's date.
 * Use IST timezone (+05:30) for every datetime.
 
 ──────── TAG & SEARCHTEXT RULES ────────
-1. Start with the full OCR text (raw flyer words).
-2. Normalise:
-   • lower-case  
-   • remove emojis & punctuation  
-   • convert synonyms with this table  
-    {
-  "techno":      ["psytrance","psy","psy-trance","tech-house","minimal","melodic techno","deep house","edm"],
-  "live-music":  ["gig","live singer","band","concert","tribute","acoustic","unplugged","cover night","jam"],
-  "hip-hop":     ["rap","hip hop","beatbox","cypher"],
-  "bollywood":   ["hindi hits","bolly","bolly-night","desi beats"],
-  "drag":        ["drag show","drag night","drag queen","lgbtq"],
-  "comedy":      ["stand-up","open mic comedy","roast","improv"],
-  "karaoke":     ["sing-along","karaoke night"],
-  "latin":       ["salsa","bachata","reggaeton","kizomba"],
-  "jazz":        ["blues","swing","bebop"],
-  "rock":        ["classic rock","indie rock","alt rock","metal"],
-  "pop":         ["chart hits","top 40","mainstream"],
-  "reggae":      ["dub","ska","dancehall"],
-  "family":      ["kids","child friendly","all ages","family-friendly"],
-  "workshop":    ["class","course","masterclass","training","bootcamp"],
-  "yoga":        ["sunrise yoga","beach yoga","wellness session"],
-  "wellness":    ["meditation","sound bath","breathwork"],
-  "market":      ["flea market","bazaar","maker market","pop-up stalls"],
-  "food-fest":   ["food festival","street food","night market","mela"],
-  "brunch":      ["sunday brunch","bottomless brunch","buffet brunch"],
-  "cocktail":    ["mixology","bartending workshop","happy hour"],
-  "beer-fest":   ["brewfest","craft beer fest","oktoberfest"],
-  "wine":        ["wine tasting","vino night"],
-  "silent-disco": ["silent party","headphone party"],
-  "rooftop":     ["terrace","skybar"],
-  "beach":       ["seaside","shore","sandy","beachside"],
-  "sunset":      ["sundowner","golden hour"],
-  "sunrise":     ["dawn","early morning"],
-  "afterparty":  ["late night","after hours","all-night"],
-  "pool":        ["poolside","swim party"],
-  "boat":        ["cruise","river cruise","yacht party"],
-  "art":         ["gallery opening","exhibition","vernissage"],
-  "poetry":      ["spoken word","shayari","ghazal"],
-  "theatre":     ["play","drama","stage show"]
-}
-3. For every synonym mapping:
-   • If any right-hand phrase appears, add the left-hand word to **tags[]**.
-4. Add any obvious vibe/venue words you spot ("rooftop", "sunset", "beach").
-5. Build **searchText** = unique words from: title + caption + tags + artist/DJ names
-   (space-separated, lower-case, duplicates removed).
-   Example:  
-   "full moon beach techno live music drums sunset rooftop"
-6. Keep tag words INSIDE searchText too.
+1. Start with the full OCR text.
+2. Normalise: lower-case, remove emojis.
+3. Use synonym mapping for tags (e.g. techno, live-music, comedy).
+4. Build searchText = unique words from: title + caption + tags + artists.
 
 ──────── OUTPUT FORMAT ────────
-Return ONLY the JSON. Do NOT wrap it in markdown or add explanations.
-Omit keys you cannot fill; do not output null for missing optional keys
-(except where the schema above explicitly allows null).
+Return ONLY the JSON. Do NOT wrap it in markdown or add explanations.`;
 
-BEGIN.`
-    };
-    const userMessages = [
-      { type: "text", text: context ? context : "Extract event information from this image." },
-      { type: "image_url", image_url: { url: imageUrl, detail: "high" } }
-    ];
-    let rawMessage = null;
-    let jsonString = null; // Declare jsonString here
-    try {
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [systemMessage, { role: "user", content: userMessages }],
-        max_tokens: 1000,
-      });
-      rawMessage = response.choices[0].message.content;
-    } catch (openaiError) {
-      logger.error('OpenAI API call failed', { error: openaiError.message, response: openaiError.response });
-      return res.status(500).json({ success: false, error: 'Extraction failed', details: 'OpenAI API call failed.' });
-    }
-    
-    // Remove Markdown code block if present
-    if (rawMessage.startsWith('```')) {
-      jsonString = rawMessage.replace(/^```[a-zA-Z]*\n?/, '').replace(/```$/, '').trim();
+    let parsedData = null;
+
+    if (modelPreference === 'gemini') {
+      logger.info('--- extractFlyerInfo: Using Gemini (AI Studio) ---');
+      if (!GEMINI_API_KEY) throw new Error('Gemini key missing');
+      try {
+        const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+        const resImg = await fetch(imageUrl);
+        const buf = await resImg.buffer();
+        const base64Data = buf.toString('base64');
+        const mimeType = path.endsWith('.mp4') ? "video/mp4" : "image/jpeg";
+
+        const result = await model.generateContent([
+          { text: `${systemPrompt}\n\n${context || "Extract event information from this image/video."}` },
+          { inlineData: { data: base64Data, mimeType } }
+        ]);
+
+        const response = await result.response;
+        let text = response.text();
+        text = text.replace(/```json\n?/, '').replace(/\n?```/, '').trim();
+        parsedData = JSON.parse(text);
+      } catch (geminiErr) {
+        logger.error('Gemini extraction failed', geminiErr);
+        throw new Error(`Gemini failed: ${geminiErr.message}`);
+      }
     } else {
-      jsonString = rawMessage.trim();
-    }
-    let parsedData;
-    try {
-      parsedData = JSON.parse(jsonString);
-    } catch (parseError) {
-      logger.error('extractFlyerInfo error: JSON parsing failed', { error: parseError.message, rawJson: jsonString });
-      return res.status(500).json({ success: false, error: 'Extraction failed', details: 'Failed to parse OpenAI response.' });
+      logger.info('--- extractFlyerInfo: Using OpenAI (GPT-5.2) ---');
+      if (!OPENAI_API_KEY) throw new Error('OpenAI key missing');
+      
+      const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+      const response = await openai.chat.completions.create({
+        model: "gpt-5.2",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: [
+            { type: "text", text: context || "Extract event information from this image." },
+            { type: "image_url", image_url: { url: imageUrl, detail: "high" } }
+          ]}
+        ],
+        max_completion_tokens: 2000,
+        response_format: { type: "json_object" }
+      });
+      
+      const content = response.choices[0].message.content;
+      if (!content) throw new Error('OpenAI returned empty content');
+      parsedData = JSON.parse(content);
     }
 
     res.status(200).json({ success: true, data: parsedData });
   } catch (err) {
-    logger.error('extractFlyerInfo error', { error: err, stack: err.stack });
-    res.status(500).json({ error: 'Extraction failed', details: err.message });
+    logger.error('extractFlyerInfo error', { error: err.message, stack: err.stack });
+    res.status(500).json({ success: false, error: 'Extraction failed', details: err.message });
   }
 });

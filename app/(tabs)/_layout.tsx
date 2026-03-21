@@ -4,12 +4,15 @@ import { Colors } from '@/constants/Colors';
 import { useColorScheme } from '@/hooks/useColorScheme';
 import { router, Slot, useGlobalSearchParams, usePathname } from 'expo-router';
 import React from 'react';
-import { Image, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { Image, StyleSheet, TouchableOpacity, View, ScrollView } from 'react-native';
 
 export default function AppShellLayout() {
   const colorScheme = useColorScheme();
   const pathname = usePathname();
   const { type: scraperTypeParam, tab: uploadTabParam, mode: venuesModeParam } = useGlobalSearchParams<{ type?: string; tab?: string; mode?: string }>();
+  const [sidebarOpen, setSidebarOpen] = React.useState(false);
+
+  const toggleSidebar = () => setSidebarOpen(!sidebarOpen);
 
   const isEvents = pathname?.startsWith('/events');
   const isVenues = pathname?.startsWith('/venues');
@@ -39,10 +42,21 @@ export default function AppShellLayout() {
   const [venuesViewExpanded, setVenuesViewExpanded] = React.useState(true);
 
   return (
-    <ThemedView style={[styles.root, { backgroundColor: Colors[colorScheme ?? 'light'].surface }]}> 
-      <ThemedView style={styles.sidebar}>
-        <Image source={require('../../assets/images/Logo Admin.png')} style={styles.brandLogo} resizeMode="contain" />
-        <View style={styles.navGroup}>
+    <ThemedView style={[styles.root, { backgroundColor: Colors[colorScheme ?? 'light'].surface }]}>
+      {/* Sidebar - Hidden by default, shows on menu click */}
+      {sidebarOpen && (
+        <ThemedView style={styles.sidebar}>
+          {/* Sidebar Header with Close Button */}
+          <View style={styles.sidebarHeader}>
+            <Image source={require('../../assets/images/Logo Admin.png')} style={styles.brandLogo} resizeMode="contain" />
+            <TouchableOpacity onPress={toggleSidebar} style={styles.closeButton}>
+              <ThemedText style={styles.iconGlyph}>✕</ThemedText>
+            </TouchableOpacity>
+          </View>
+
+          {/* Scrollable Navigation Content */}
+          <ScrollView style={styles.sidebarContent} showsVerticalScrollIndicator={true}>
+            <View style={styles.navGroup}>
           <View style={[styles.navItemRow, isEvents && styles.navItemActive]}>
             <TouchableOpacity onPress={() => router.push('/events/upload?tab=oneTime')} style={styles.navItemLabel}>
               <ThemedText style={[styles.navText, isEvents && styles.navTextActive]}>Events</ThemedText>
@@ -196,12 +210,32 @@ export default function AppShellLayout() {
             )}
           </View>
           )}
-        </View>
-      </ThemedView>
+            </View>
+          </ScrollView>
+        </ThemedView>
+      )}
 
+      {/* Main content with header */}
       <View style={styles.content}>
-        <Slot />
+        {/* Header with menu button */}
+        <View style={[styles.header, { backgroundColor: Colors[colorScheme ?? 'light'].surface, borderBottomColor: Colors[colorScheme ?? 'light'].border }]}>
+          <TouchableOpacity onPress={toggleSidebar} style={styles.menuButton}>
+            <ThemedText style={styles.iconGlyph}>☰</ThemedText>
+          </TouchableOpacity>
+          <ThemedText style={styles.headerTitle}>Ask Timmy</ThemedText>
+          <View style={styles.headerSpacer} />
+        </View>
+
+        {/* Page content */}
+        <View style={styles.pageContent}>
+          <Slot />
+        </View>
       </View>
+
+      {/* Overlay backdrop when sidebar is open */}
+      {sidebarOpen && (
+        <TouchableOpacity style={styles.backdrop} onPress={toggleSidebar} activeOpacity={0.3} />
+      )}
     </ThemedView>
   );
 }
@@ -210,22 +244,55 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     flexDirection: 'row',
+    position: 'relative',
   },
   sidebar: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
     width: 280,
-    paddingTop: 24,
-    paddingHorizontal: 16,
     borderRightWidth: 1,
     borderRightColor: Colors.light.border,
-    gap: 8,
+    zIndex: 1000,
+    backgroundColor: Colors.light.surface,
+    flexDirection: 'column',
+  },
+  sidebarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 16,
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.light.border,
+  },
+  sidebarContent: {
+    flex: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+  },
+  closeButton: {
+    padding: 8,
+    borderRadius: 6,
+  },
+  backdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    zIndex: 999,
   },
   brandLogo: {
-    width: 180,
-    height: 48,
-    marginBottom: 16,
+    width: 140,
+    height: 36,
   },
   navGroup: {
     gap: 4,
+    paddingBottom: 16,
   },
   navItemRow: {
     paddingVertical: 12,
@@ -321,6 +388,35 @@ const styles = StyleSheet.create({
     textDecorationLine: 'underline',
   },
   content: {
+    flex: 1,
+    flexDirection: 'column',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    gap: 12,
+  },
+  menuButton: {
+    padding: 8,
+    borderRadius: 6,
+  },
+  iconGlyph: {
+    fontSize: 22,
+    lineHeight: 24,
+    color: Colors.light.text,
+    fontWeight: '600',
+  },
+  headerTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  headerSpacer: {
+    flex: 1,
+  },
+  pageContent: {
     flex: 1,
     minWidth: 0,
   },

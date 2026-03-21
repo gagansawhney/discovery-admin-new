@@ -12,6 +12,9 @@ exports.deleteClassificationItem = functions.https.onRequest(async (req, res) =>
     const { runId, itemId } = req.body || {};
     if (!runId || !itemId) return res.status(400).json({ success: false, error: 'Missing runId or itemId' });
     const clsId = `${runId}_${itemId}`;
+    
+    // We only delete the classification log/record.
+    // The actual event in the 'events' collection remains untouched.
     await externalDb.collection('apifyClassifications').doc(clsId).delete();
     return res.status(200).json({ success: true, deletedId: clsId });
   } catch (e) {

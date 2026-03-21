@@ -8,7 +8,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import { Box, Chip, Divider, IconButton, Button as MUIButton, ToggleButton, ToggleButtonGroup, Tooltip } from '@mui/material';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Dimensions, Image, Modal, Platform, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Dimensions, FlatList, Image, Modal, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 
 const SCHEDULE_SCRAPE_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/scheduleScrape';
 const MANUAL_POLL_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/manualPollApifyRuns';
@@ -19,7 +19,18 @@ const CLASSIFY_RUN_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctio
 const PROCESS_CLASSIFIED_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/processClassifiedRun';
 const RETRY_ITEM_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/retryClassifyItem';
 const DELETE_CLASS_ITEM_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/deleteClassificationItem';
+const MANAGE_VENUES_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/manageVenues';
 const GET_APIFY_RESULTS_URL = 'https://us-central1-discovery-admin-f87ce.cloudfunctions.net/getApifyRunResults';
+
+interface Venue {
+  id: string;
+  name: string;
+  nameVariations: string[];
+  address: string;
+  latitude: number;
+  longitude: number;
+  googleMapLink: string;
+}
 
 interface ApifyRun {
   runId: string;
@@ -35,6 +46,7 @@ interface ApifyRun {
 }
 
 export default function ScraperAutomaticScreen() {
+  console.log('--- SCRAPER AUTOMATIC RENDER ---');
   const [scheduleStartTimes, setScheduleStartTimes] = useState<Record<'posts' | 'stories', string>>({ posts: '', stories: '' });
   const [scheduleRepeats, setScheduleRepeats] = useState<Record<'posts' | 'stories', 'once' | 'daily'>>({ posts: 'once', stories: 'once' });
   const [schedulingType, setSchedulingType] = useState<'posts' | 'stories' | null>(null);
@@ -57,75 +69,88 @@ export default function ScraperAutomaticScreen() {
   const [isLoadingRuns, setIsLoadingRuns] = useState<boolean>(false);
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
   const [classifyingRunId, setClassifyingRunId] = useState<string | null>(null);
+  const [reclassifyingRunId, setReclassifyingRunId] = useState<string | null>(null);
+  const [reprocessingRunId, setReprocessingRunId] = useState<string | null>(null);
   const [processingRunId, setProcessingRunId] = useState<string | null>(null);
-  const [classifiedStatsByRun, setClassifiedStatsByRun] = useState<Record<string, { processed: number; classified: number; skipped: number; errors: number }>>({});
-  const [nonEvents, setNonEvents] = useState<any[]>([]);
-  const [isLoadingNonEvents, setIsLoadingNonEvents] = useState<boolean>(true);
-  const [nonEventsError, setNonEventsError] = useState<string | null>(null);
-  const [runReviews, setRunReviews] = useState<Record<string, { loading: boolean; error: string | null; events: any[]; nonEvents: any[] }>>({});
-  const [isReviewModalVisible, setIsReviewModalVisible] = useState(false);
-  const [reviewList, setReviewList] = useState<any[]>([]);
-  const [reviewIndex, setReviewIndex] = useState<number>(0);
-  const [reviewRunId, setReviewRunId] = useState<string | null>(null);
-  const [reviewCategory, setReviewCategory] = useState<'events' | 'nonEvents'>('events');
-  const [retryingItemId, setRetryingItemId] = useState<string | null>(null);
-  const screenHeight = Dimensions.get('window').height;
-  const modalImageHeight = Math.max(400, Math.floor(screenHeight * 0.65));
-  const [expandedRuns, setExpandedRuns] = useState<Record<string, boolean>>({});
-  const toggleRunCard = (runId: string) => setExpandedRuns(prev => ({ ...prev, [runId]: !prev[runId] }));
-  const [expandedSections, setExpandedSections] = useState<{ schedule: boolean; posts: boolean; stories: boolean }>({
-    schedule: false,
-    posts: false,
-    stories: false,
-  });
-  const toggleSection = (section: keyof typeof expandedSections) =>
-    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
-
-  // Cache of raw Apify items per run for modal details
-  const [apifyRawByRun, setApifyRawByRun] = useState<Record<string, { loading: boolean; error: string | null; itemsById: Record<string, any> }>>({});
-
-  const ensureApifyRaw = async (runId: string) => {
-    if (!runId) return;
-    const existing = apifyRawByRun[runId];
-    if (existing && (existing.loading === false) && existing.itemsById && Object.keys(existing.itemsById).length > 0) return;
-    setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: true, error: null, itemsById: prev[runId]?.itemsById || {} } }));
-    try {
-      // Try REST read of apifyResults to avoid normalization losing original ids
-      const fsUrl = `https://firestore.googleapis.com/v1/projects/discovery-1e94e/databases/(default)/documents/apifyResults/${encodeURIComponent(runId)}`;
-      const fsRes = await fetch(fsUrl);
-      if (fsRes.ok) {
-        const doc = await fsRes.json();
-        const fields = doc.fields || {};
-        const rawResults = decodeFsValue(fields.results) || [];
-        const itemsById: Record<string, any> = {};
-        for (const item of Array.isArray(rawResults) ? rawResults : []) {
-          const key = item?.id || item?.shortcode || item?.code || item?.postId || item?.story_id || item?.media || item?.source;
-          if (key) itemsById[String(key)] = item;
-        }
-        setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: false, error: null, itemsById } }));
-        return;
-      }
-      // Fallback to cloud function
-      const resp = await fetch(GET_APIFY_RESULTS_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId }) });
-      const data = await resp.json();
-      if (!resp.ok || !data.success || !Array.isArray(data.data)) {
-        setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: false, error: data.error || 'Failed to load Apify results', itemsById: {} } }));
-        return;
-      }
-      const itemsById2: Record<string, any> = {};
-      for (const item of data.data) {
-        const key = item?.id || item?.shortcode || item?.code || item?.postId;
-        if (key) itemsById2[String(key)] = item;
-      }
-      setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: false, error: null, itemsById: itemsById2 } }));
-    } catch (e: any) {
-      setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: false, error: e?.message || 'Failed to load Apify results', itemsById: {} } }));
+  const [postsModel, setPostsModel] = useState<'openai' | 'gemini'>('openai');
+  const [storiesModel, setStoriesModel] = useState<'openai' | 'gemini'>('gemini');
+  const [filterDays, setFilterDays] = useState(7);
+  const [venues, setVenues] = useState<Venue[]>([]);
+  const sortedVenues = React.useMemo(() => [...venues].sort((a, b) => a.name.localeCompare(b.name)), [venues]);
+  
+  // Firestore REST value decoder (for apifyResults fetching)
+  const decodeFsValue = (v: any): any => {
+    if (!v || typeof v !== 'object') return v;
+    if ('stringValue' in v) return v.stringValue;
+    if ('booleanValue' in v) return v.booleanValue;
+    if ('integerValue' in v) return Number(v.integerValue);
+    if ('doubleValue' in v) return v.doubleValue;
+    if ('timestampValue' in v) return v.timestampValue;
+    if ('mapValue' in v) {
+      const obj: any = {};
+      const fields = v.mapValue.fields || {};
+      Object.keys(fields).forEach(k => { obj[k] = decodeFsValue(fields[k]); });
+      return obj;
     }
+    if ('arrayValue' in v) {
+      const arr = v.arrayValue.values || [];
+      return arr.map((x: any) => decodeFsValue(x));
+    }
+    return null;
   };
 
-  // New state for custom confirmation modal
-  const [isConfirmModalVisible, setIsConfirmModalVisible] = useState(false);
-  const [confirmModalScheduleId, setConfirmModalScheduleId] = useState<string | null>(null);
+  const pickImageUrl = (item: any): string | null => {
+    // 1. If it's a video, we MUST use the thumbnail for the UI/AI
+    if (item.mediaType === 'video' || item.isVideo === true) {
+      const thumb = item.thumbnailUrl || item.thumbnail;
+      if (typeof thumb === 'string') return thumb;
+    }
+
+    // 2. Try the standard Instagram large media endpoint
+    const shortcode = item.shortcode || item.shortCode || item.code || null;
+    if (typeof shortcode === 'string' && shortcode.length > 0 && !item.mediaUrl?.includes('.mp4')) {
+      return `https://www.instagram.com/p/${shortcode}/media/?size=l`;
+    }
+
+    const candidates = [item?.displayUrl, item?.thumbnailUrl, item?.thumbnail, item?.mediaUrl, item?.media, item?.image, item?.url];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c && !c.includes('.mp4')) return c;
+    }
+    
+    // Final fallback to thumbnail even if candidates had issues
+    return item.thumbnailUrl || item.thumbnail || null;
+  };
+
+  const getItemId = (item: any, index: number) => item?.id || item?.shortcode || String(index);
+
+  const formatDate = (input: any): string => {
+    const d = new Date(input);
+    if (isNaN(d.getTime())) return '';
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+  };
+
+  const loadVenues = async () => {
+    try {
+      const response = await fetch(MANAGE_VENUES_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'list' })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setVenues(data.venues || []);
+        }
+      }
+    } catch (error) {
+      console.error('🏢 Error loading venues:', error);
+    }
+  };
 
   const fetchSchedules = async () => {
     setIsLoadingSchedules(true);
@@ -172,10 +197,184 @@ export default function ScraperAutomaticScreen() {
     }
   };
 
+  useEffect(() => {
+    loadVenues();
+  }, []);
+
+  const [isVenuePickerVisible, setIsVenuePickerVisible] = useState(false);
+  const [matchingVenueId, setMatchingVenueId] = useState<string | null>(null);
+  const [venueSearchQuery, setVenueSearchQuery] = useState('');
+  const [isMatchingVenue, setIsMatchingVenue] = useState(false);
+
+  const filteredVenues = sortedVenues.filter(v => 
+    v.name.toLowerCase().includes(venueSearchQuery.toLowerCase()) ||
+    v.nameVariations?.some(nv => nv.toLowerCase().includes(venueSearchQuery.toLowerCase()))
+  );
+
+  const handleManualVenueLink = async (targetVenue: Venue) => {
+    const currentItem = reviewList[reviewIndex];
+    let detectedVenueName = currentItem.detectedVenueName || currentItem?.signals?.matchedVenueName || currentItem?.signals?.venueName || currentItem?.signals?.venue || currentItem?.venue?.name || currentItem?.venueName;
+
+    // Fallback: parse from error message
+    if (!detectedVenueName && currentItem.error?.includes('Venue not found')) {
+      const match = currentItem.error.match(/"([^"]+)"/);
+      if (match) detectedVenueName = match[1];
+    }
+
+    if (!detectedVenueName || typeof detectedVenueName !== 'string') {
+      Alert.alert('Error', 'No detected venue name to link.');
+      return;
+    }
+
+    const confirm = (Platform.OS === 'web' && typeof window !== 'undefined') ? window.confirm(`Link "${detectedVenueName}" as an alias for "${targetVenue.name}" and process the event?`) : true;
+    if (!confirm) return;
+
+    setIsMatchingVenue(true);
+    try {
+      // 1. Add Alias to Venue
+      const upVariations = Array.from(new Set([...(targetVenue.nameVariations || []), detectedVenueName]));
+      const upRes = await fetch(MANAGE_VENUES_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update',
+          venue: { ...targetVenue, nameVariations: upVariations }
+        })
+      });
+      const upData = await upRes.json();
+      if (!upRes.ok || !upData.success) throw new Error(upData.error || 'Failed to update venue aliases');
+
+      // 2. Refresh local venues list
+      await loadVenues();
+      
+      // 3. Trigger Reprocess/Retry for this item with the forced venue ID
+      const itemId = currentItem.itemId || currentItem.id;
+      const resp = await fetch(RETRY_ITEM_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          runId: reviewRunId, 
+          itemId, 
+          model: extractionModel,
+          forceVenueId: targetVenue.id 
+        })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Retry failed');
+      
+      // Update UI
+      const updated = data.updated || {};
+      const updatedFields = {
+        ...updated,
+        id: updated.id || currentItem.id,
+        itemId: updated.itemId || currentItem.itemId,
+      };
+
+      setReviewList(prev => {
+        const copy = [...prev];
+        copy[reviewIndex] = { ...copy[reviewIndex], ...updatedFields, error: null };
+        return copy;
+      });
+      
+      setIsVenuePickerVisible(false);
+      Alert.alert('Success', `Linked "${detectedVenueName}" to ${targetVenue.name} and processed successfully.`);
+      fetchApifyRuns();
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'Failed to link venue');
+    } finally {
+      setIsMatchingVenue(false);
+    }
+  };
+  const [classifiedStatsByRun, setClassifiedStatsByRun] = useState<Record<string, { processed: number; classified: number; skipped: number; errors: number }>>({});
+  const [nonEvents, setNonEvents] = useState<any[]>([]);
+  const [isLoadingNonEvents, setIsLoadingNonEvents] = useState<boolean>(true);
+  const [nonEventsError, setNonEventsError] = useState<string | null>(null);
+  const [runReviews, setRunReviews] = useState<Record<string, { loading: boolean; error: string | null; events: any[]; nonEvents: any[] }>>({});
+  const [isReviewModalVisible, setIsReviewModalVisible] = useState(false);
+  const [reviewList, setReviewList] = useState<any[]>([]);
+  const [reviewIndex, setReviewIndex] = useState<number>(0);
+  const [reviewRunId, setReviewRunId] = useState<string | null>(null);
+  const [reviewCategory, setReviewCategory] = useState<'events' | 'nonEvents' | 'processed'>('events');
+  const [retryingItemId, setRetryingItemId] = useState<string | null>(null);
+  const screenHeight = Dimensions.get('window').height;
+  const modalImageHeight = Math.max(400, Math.floor(screenHeight * 0.65));
+  const [expandedRuns, setExpandedRuns] = useState<Record<string, boolean>>({});
+  const toggleRunCard = (runId: string) => setExpandedRuns(prev => ({ ...prev, [runId]: !prev[runId] }));
+  const [expandedSections, setExpandedSections] = useState<{ posts: boolean; stories: boolean }>({
+    posts: false,
+    stories: false,
+  });
+  const toggleSection = (section: keyof typeof expandedSections) =>
+    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+
+  // Subsection collapsible state (for Schedule, Pending, Completed, Classified, Processed, Errors)
+  const [expandedSubsections, setExpandedSubsections] = useState<Record<string, boolean>>({
+    'posts-schedule': false,
+    'posts-pending': false,
+    'posts-completed': false,
+    'posts-classified': false,
+    'posts-processed': false,
+    'posts-errors': false,
+    'stories-schedule': false,
+    'stories-pending': false,
+    'stories-completed': false,
+    'stories-classified': false,
+    'stories-processed': false,
+    'stories-errors': false,
+  });
+  const toggleSubsection = (id: string) =>
+    setExpandedSubsections(prev => ({ ...prev, [id]: !prev[id] }));
+
+  // Cache of raw Apify items per run for modal details
+  const [apifyRawByRun, setApifyRawByRun] = useState<Record<string, { loading: boolean; error: string | null; itemsById: Record<string, any> }>>({});
+
+  const ensureApifyRaw = async (runId: string) => {
+    if (!runId) return;
+    const existing = apifyRawByRun[runId];
+    if (existing && (existing.loading === false) && existing.itemsById && Object.keys(existing.itemsById).length > 0) return;
+    setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: true, error: null, itemsById: prev[runId]?.itemsById || {} } }));
+    try {
+      // Try REST read of apifyResults to avoid normalization losing original ids
+      const fsUrl = `https://firestore.googleapis.com/v1/projects/discovery-1e94e/databases/(default)/documents/apifyResults/${encodeURIComponent(runId)}`;
+      const fsRes = await fetch(fsUrl);
+      if (fsRes.ok) {
+        const doc = await fsRes.json();
+        const fields = doc.fields || {};
+        const rawResults = decodeFsValue(fields.results) || [];
+        const itemsById: Record<string, any> = {};
+        for (const item of Array.isArray(rawResults) ? rawResults : []) {
+          const key = item?.id || item?.shortcode || item?.code || item?.postId || item?.story_id || item?.media || item?.source;
+          if (key) itemsById[String(key)] = item;
+        }
+        setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: false, error: null, itemsById } }));
+        return;
+      }
+      // Fallback to cloud function
+      const resp = await fetch(GET_APIFY_RESULTS_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId }) });
+      const data = await resp.json();
+      if (!resp.ok || !data.success || !Array.isArray(data.data)) {
+        setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: false, error: data.error || 'Failed to load Apify results', itemsById: {} } }));
+        return;
+      }
+      const itemsById2: Record<string, any> = {};
+      for (const item of data.data) {
+        const key = item?.id || item?.shortcode || item?.code || item?.postId;
+        if (key) itemsById2[String(key)] = item;
+      }
+      setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: false, error: null, itemsById: itemsById2 } }));
+    } catch (e: any) {
+      setApifyRawByRun(prev => ({ ...prev, [runId]: { loading: false, error: e?.message || 'Failed to load Apify results', itemsById: {} } }));
+    }
+  };
+
+  // subsection collapsible state
+  const [isConfirmModalVisible, setIsConfirmModalVisible] = useState(false);
+  const [confirmModalScheduleId, setConfirmModalScheduleId] = useState<string | null>(null);
+
   const handleDeleteApifyRun = async (runId: string) => {
     const message = `Are you sure you want to delete this run and all its scraped data? This action cannot be undone.`;
     let shouldDelete = false;
-    if (Platform.OS === 'web') {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
       shouldDelete = window.confirm(message);
     } else {
       shouldDelete = true;
@@ -207,12 +406,14 @@ export default function ScraperAutomaticScreen() {
   };
 
   const handleManualClassifyRun = async (runId: string) => {
+    const run = apifyRuns.find(r => r.runId === runId);
+    const model = run?.type === 'stories' ? storiesModel : postsModel;
     setClassifyingRunId(runId);
     try {
       const classifyResp = await fetch(CLASSIFY_RUN_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ runId })
+        body: JSON.stringify({ runId, model })
       });
       const classifyData = await classifyResp.json();
       if (!classifyResp.ok || !classifyData.success) {
@@ -244,69 +445,62 @@ export default function ScraperAutomaticScreen() {
     }
   };
 
-  const handleProcessClassifiedRun = async (runId: string) => {
-    setProcessingRunId(runId);
+  const handleReclassifyRun = async (runId: string) => {
+    const confirm = (Platform.OS === 'web' && typeof window !== 'undefined') ? window.confirm('Reclassify all items in this run? This will re-run AI classification on every post.') : true;
+    if (!confirm) return;
+
+    setReclassifyingRunId(runId);
+    try {
+      const response = await fetch(CLASSIFY_RUN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId, reclassify: true })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to reclassify run');
+      }
+      Alert.alert('Success', 'Run reclassification completed.');
+      await fetchRunReview({ runId } as any);
+      fetchApifyRuns();
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'Failed to reclassify run');
+    } finally {
+      setReclassifyingRunId(null);
+    }
+  };
+
+  const handleProcessClassifiedRun = async (runId: string, reprocess: boolean = false) => {
+    const run = apifyRuns.find(r => r.runId === runId);
+    const model = run?.type === 'stories' ? storiesModel : postsModel;
+    const setBusy = reprocess ? setReprocessingRunId : setProcessingRunId;
+    const isBusyId = reprocess ? reprocessingRunId : processingRunId;
+    
+    if (reprocess) {
+      const confirm = (Platform.OS === 'web' && typeof window !== 'undefined') ? window.confirm('Reprocess all items? This will re-extract flyer info and update existing events.') : true;
+      if (!confirm) return;
+    }
+
+    setBusy(runId);
     try {
       const processResp = await fetch(PROCESS_CLASSIFIED_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ runId })
+        body: JSON.stringify({ runId, reprocess, model })
       });
       const processData = await processResp.json();
       if (!processResp.ok || !processData.success) {
         throw new Error(processData.error || 'Failed to process classified events');
       }
-      Alert.alert('Success', 'Processing completed.');
+      Alert.alert('Success', reprocess ? 'Reprocessing completed.' : 'Processing completed.');
       await fetchRunReview({ runId } as any);
       await ensureApifyRaw(runId);
       fetchApifyRuns();
     } catch (e: any) {
       Alert.alert('Error', e.message || 'Failed to process classified events');
     } finally {
-      setProcessingRunId(null);
+      setBusy(null);
     }
-  };
-
-  const pickImageUrl = (item: any): string | null => {
-    const candidates = [item?.displayUrl, item?.thumbnailUrl, item?.thumbnail, item?.mediaUrl, item?.media, item?.image, item?.url];
-    for (const c of candidates) {
-      if (typeof c === 'string' && c && !c.includes('.mp4')) return c;
-    }
-    return null;
-  };
-
-  const getItemId = (item: any, index: number) => item?.id || item?.shortcode || String(index);
-
-  const formatDate = (input: any): string => {
-    const d = new Date(input);
-    if (isNaN(d.getTime())) return '';
-    const dd = String(d.getDate()).padStart(2, '0');
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const yyyy = d.getFullYear();
-    const hh = String(d.getHours()).padStart(2, '0');
-    const min = String(d.getMinutes()).padStart(2, '0');
-    return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
-  };
-
-  // Firestore REST value decoder (for apifyResults fetching)
-  const decodeFsValue = (v: any): any => {
-    if (!v || typeof v !== 'object') return v;
-    if ('stringValue' in v) return v.stringValue;
-    if ('booleanValue' in v) return v.booleanValue;
-    if ('integerValue' in v) return Number(v.integerValue);
-    if ('doubleValue' in v) return v.doubleValue;
-    if ('timestampValue' in v) return v.timestampValue;
-    if ('mapValue' in v) {
-      const obj: any = {};
-      const fields = v.mapValue.fields || {};
-      Object.keys(fields).forEach(k => { obj[k] = decodeFsValue(fields[k]); });
-      return obj;
-    }
-    if ('arrayValue' in v) {
-      const arr = v.arrayValue.values || [];
-      return arr.map((x: any) => decodeFsValue(x));
-    }
-    return null;
   };
 
   const fetchRunReview = async (run: ApifyRun) => {
@@ -361,6 +555,8 @@ export default function ScraperAutomaticScreen() {
           eventId: f.eventId?.stringValue || null,
           path: f.path?.stringValue || null,
           error: f.error?.stringValue || null,
+          detectedVenueName: f.detectedVenueName?.stringValue || null,
+          detectedDate: f.detectedDate?.stringValue || null,
         };
       });
       const nonEventsForRun: any[] = clsList.filter(c => c.isEvent === false);
@@ -550,11 +746,36 @@ export default function ScraperAutomaticScreen() {
         onPress={() => toggleSection(section)}
         activeOpacity={0.8}
       >
-        <View style={styles.accordionHeaderContent}>{headerContent}</View>
-        {expandedSections[section] ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+        {headerContent}
       </TouchableOpacity>
       {expandedSections[section] && (
         <View style={styles.accordionContent}>{content}</View>
+      )}
+    </View>
+  );
+
+  const renderSubsectionCollapsible = (
+    id: string,
+    title: string,
+    count: number,
+    content: React.ReactNode
+  ) => (
+    <View key={id} style={styles.subsectionWrapper}>
+      <TouchableOpacity
+        style={styles.subsectionHeader}
+        onPress={() => toggleSubsection(id)}
+        activeOpacity={0.8}
+      >
+        <View style={styles.subsectionHeaderContent}>
+          <ThemedText style={styles.subsectionTitle}>{title}</ThemedText>
+          <View style={styles.countBadge}>
+            <ThemedText style={styles.countBadgeText}>{count}</ThemedText>
+          </View>
+        </View>
+        {expandedSubsections[id] ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+      </TouchableOpacity>
+      {expandedSubsections[id] && (
+        <View style={styles.subsectionContent}>{content}</View>
       )}
     </View>
   );
@@ -594,18 +815,25 @@ export default function ScraperAutomaticScreen() {
     .filter(run => ['COMPLETED', 'succeeded', 'failed'].includes(run.status))
     .filter(run => !isRunClassified(run));
 
+  const isWithinFilterRange = (run: ApifyRun) => {
+    if (filterDays === -1) return true; // Show all
+    const runDate = new Date(run.completedAt || run.initiatedAt).getTime();
+    const cutoff = Date.now() - (filterDays * 24 * 60 * 60 * 1000);
+    return runDate > cutoff;
+  };
+
   const classifiedPostsRuns = completedRunsWithClassifications.filter(
     run => run.type !== 'stories' && !runHasProcessedEvents(run)
   );
   const processedPostsRuns = completedRunsWithClassifications.filter(
-    run => run.type !== 'stories' && runHasProcessedEvents(run)
+    run => run.type !== 'stories' && runHasProcessedEvents(run) && isWithinFilterRange(run)
   );
 
   const classifiedStoriesRuns = completedRunsWithClassifications.filter(
     run => run.type === 'stories' && !runHasProcessedEvents(run)
   );
   const processedStoriesRuns = completedRunsWithClassifications.filter(
-    run => run.type === 'stories' && runHasProcessedEvents(run)
+    run => run.type === 'stories' && runHasProcessedEvents(run) && isWithinFilterRange(run)
   );
 
   const getLogCategories = (log: any): string[] => {
@@ -784,6 +1012,7 @@ export default function ScraperAutomaticScreen() {
 
   const renderCompletedRunCard = (run: ApifyRun, keyPrefix: string) => {
     const isOpen = !!expandedRuns[run.runId];
+    
     return (
       <View key={`${keyPrefix}-${run.runId}`} style={[styles.runItem, { flexDirection: 'column', alignItems: 'flex-start' }]}>
         <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', width: '100%' }} onPress={() => toggleRunCard(run.runId)}>
@@ -793,12 +1022,13 @@ export default function ScraperAutomaticScreen() {
           </View>
         </TouchableOpacity>
         {isOpen && (
-          <View style={{ marginTop: 6 }}>
+          <View style={{ marginTop: 6, width: '100%' }}>
             <ThemedText>Status: {run.status}</ThemedText>
             <ThemedText>Initiated: {formatDate(run.initiatedAt)}</ThemedText>
             {run.completedAt && (<ThemedText>Completed: {formatDate(run.completedAt)}</ThemedText>)}
             {run.error && (<ThemedText style={{ color: '#DC2626' }}>Error: {run.error}</ThemedText>)}
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 }}>
+            
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12 }}>
               <MUIButton variant="outlined" size="small" onClick={() => handleManualClassifyRun(run.runId)} disabled={classifyingRunId === run.runId}>
                 {classifyingRunId === run.runId ? 'Classifying...' : 'Classify'}
               </MUIButton>
@@ -816,14 +1046,21 @@ export default function ScraperAutomaticScreen() {
 
   const renderClassifiedRunRow = (run: ApifyRun, variant: 'classified' | 'processed') => {
     const review = runReviews[run.runId];
-    const eventsCount = review?.events?.length ?? 0;
-    const processedEventsCount = review?.events?.filter((event: any) => !!event.eventId)?.length ?? 0;
+    const totalEventsList = review?.events || [];
+    const processedEventsList = totalEventsList.filter((ev: any) => !!ev.eventId);
+    const pendingEventsList = totalEventsList.filter((ev: any) => !ev.eventId);
+
+    const eventsCount = pendingEventsList.length;
+    const processedEventsCount = processedEventsList.length;
     const nonEventsCount = review?.nonEvents?.length ?? 0;
     const stats = classifiedStatsByRun[run.runId];
+    const screenWidth = Dimensions.get('window').width;
+    const isMobileView = screenWidth < 768;
+
     return (
       <TouchableOpacity
         key={`classified-${run.runId}`}
-        style={[styles.runItem, { paddingRight: 12 }]}
+        style={[styles.runItem, { paddingRight: 12, flexDirection: 'column', alignItems: 'stretch' }]}
         onPress={async () => {
           const r = runReviews[run.runId];
           if (!r) {
@@ -831,7 +1068,7 @@ export default function ScraperAutomaticScreen() {
             Alert.alert('Loading', 'Fetching run details. Please try again in a moment.');
             return;
           }
-          const listToShow = (r.events && r.events.length > 0) ? r.events : r.nonEvents || [];
+          const listToShow = (pendingEventsList.length > 0) ? pendingEventsList : (processedEventsList.length > 0 ? processedEventsList : r.nonEvents || []);
           if (listToShow.length === 0) {
             Alert.alert('No items', 'No classified items available for this run.');
             return;
@@ -839,15 +1076,23 @@ export default function ScraperAutomaticScreen() {
           await ensureApifyRaw(run.runId);
           setReviewList(listToShow);
           setReviewRunId(run.runId);
-          setReviewCategory((r.events && r.events.length > 0) ? 'events' : 'nonEvents');
+          setReviewCategory(pendingEventsList.length > 0 ? 'events' : (processedEventsList.length > 0 ? 'processed' : 'nonEvents'));
           setReviewIndex(0);
           setIsReviewModalVisible(true);
         }}
       >
         <View style={styles.runContent}>
-          <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
-          <ThemedText>
-            Events: {eventsCount}  •  Processed: {processedEventsCount}  •  Non-Events: {nonEventsCount}
+          <View>
+            <ThemedText style={styles.runIdText}>Run ID: {run.runId}</ThemedText>
+            {variant === 'processed' && (
+              <ThemedText style={{ color: '#64748B', fontSize: 12, marginTop: 2 }}>
+                {formatDate(run.completedAt || run.initiatedAt)}
+              </ThemedText>
+            )}
+          </View>
+          
+          <ThemedText style={{ marginTop: 4 }}>
+            Pending: {eventsCount}  •  Processed: {processedEventsCount}  •  Non-Events: {nonEventsCount}
           </ThemedText>
           {stats ? (
             <ThemedText style={{ color: '#64748B', marginTop: 2 }}>
@@ -855,40 +1100,80 @@ export default function ScraperAutomaticScreen() {
             </ThemedText>
           ) : null}
         </View>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          {variant === 'classified' && (
+        <View style={[styles.classifiedButtonsContainer, isMobileView && styles.classifiedButtonsContainerMobile]}>
+          {(variant === 'classified' || (variant === 'processed' && (stats?.errors || 0) > 0)) && (
             <MUIButton
               variant="contained"
               size="small"
               onClick={async (e: any) => {
                 e?.stopPropagation?.();
-                await handleProcessClassifiedRun(run.runId);
+                await handleProcessClassifiedRun(run.runId, false);
               }}
               disabled={processingRunId === run.runId}
             >
-              {processingRunId === run.runId ? 'Processing...' : 'Process'}
+              {processingRunId === run.runId ? 'Processing...' : (variant === 'processed' ? 'Retry Errors' : 'Process')}
+            </MUIButton>
+          )}
+
+          {variant === 'processed' && (
+            <MUIButton
+              variant="outlined"
+              size="small"
+              color="secondary"
+              onClick={async (e: any) => {
+                e?.stopPropagation?.();
+                await handleProcessClassifiedRun(run.runId, true);
+              }}
+              disabled={reprocessingRunId === run.runId}
+            >
+              {reprocessingRunId === run.runId ? 'Reprocessing...' : 'Reprocess'}
+            </MUIButton>
+          )}
+
+          {variant === 'classified' && (
+            <MUIButton
+              variant="outlined"
+              size="small"
+              color="warning"
+              onClick={async (e: any) => {
+                e?.stopPropagation?.();
+                await handleReclassifyRun(run.runId);
+              }}
+              disabled={reclassifyingRunId === run.runId}
+            >
+              {reclassifyingRunId === run.runId ? 'Reclassifying...' : 'Reclassify'}
             </MUIButton>
           )}
           <MUIButton
             variant="outlined"
             size="small"
+            color="success"
             onClick={async (e: any) => {
               e?.stopPropagation?.();
-              let r = runReviews[run.runId];
-              if (!r || r.loading) {
-                const fetched = await fetchRunReview(run);
-                r = fetched ? { loading: false, error: null, events: fetched.events, nonEvents: fetched.nonEvents } as any : runReviews[run.runId];
-              }
-              if (!r) {
-                Alert.alert('Loading', 'Fetching run details. Please try again in a moment.');
+              if (processedEventsList.length === 0) {
+                Alert.alert('No items', 'No processed events available for this run.');
                 return;
               }
-              const listToShow = r.events || [];
-              if (listToShow.length === 0) {
-                Alert.alert('No items', 'No events available for this run.');
+              await ensureApifyRaw(run.runId);
+              setReviewList(processedEventsList);
+              setReviewRunId(run.runId);
+              setReviewCategory('processed');
+              setReviewIndex(0);
+              setIsReviewModalVisible(true);
+            }}
+          >
+            Processed
+          </MUIButton>
+          <MUIButton
+            variant="outlined"
+            size="small"
+            onClick={async (e: any) => {
+              e?.stopPropagation?.();
+              if (pendingEventsList.length === 0) {
+                Alert.alert('No items', 'No pending events available for this run.');
                 return;
               }
-              setReviewList(listToShow);
+              setReviewList(pendingEventsList);
               setReviewRunId(run.runId);
               setReviewCategory('events');
               setReviewIndex(0);
@@ -944,28 +1229,6 @@ export default function ScraperAutomaticScreen() {
     );
   };
 
-  const renderClassifiedRunsSection = (type: 'posts' | 'stories') => {
-    if (isLoadingEvents) {
-      return <ActivityIndicator size="small" />;
-    }
-    if (fetchError) {
-      return <ThemedText style={{ color: '#DC2626' }}>Error: {fetchError}</ThemedText>;
-    }
-    const runs = type === 'stories' ? classifiedStoriesRuns : classifiedPostsRuns;
-    if (runs.length === 0) {
-      return (
-        <ThemedText style={{ color: '#64748B' }}>
-          {type === 'stories' ? 'No classified stories runs.' : 'No classified posts runs.'}
-        </ThemedText>
-      );
-    }
-    return (
-      <View style={{ gap: 8 }}>
-        {runs.map(run => renderClassifiedRunRow(run, 'classified'))}
-      </View>
-    );
-  };
-
   const renderProcessedRunsSection = (type: 'posts' | 'stories') => {
     if (isLoadingEvents) {
       return <ActivityIndicator size="small" />;
@@ -973,7 +1236,11 @@ export default function ScraperAutomaticScreen() {
     if (fetchError) {
       return <ThemedText style={{ color: '#DC2626' }}>Error: {fetchError}</ThemedText>;
     }
-    const runs = type === 'stories' ? processedStoriesRuns : processedPostsRuns;
+    
+    const runs = type === 'stories' 
+      ? [...processedStoriesRuns, ...classifiedStoriesRuns] 
+      : [...processedPostsRuns, ...classifiedPostsRuns];
+
     if (runs.length === 0) {
       return (
         <ThemedText style={{ color: '#64748B' }}>
@@ -981,9 +1248,16 @@ export default function ScraperAutomaticScreen() {
         </ThemedText>
       );
     }
+    
+    const sortedRuns = runs.sort((a, b) => {
+      const timeA = new Date(a.completedAt || a.initiatedAt).getTime();
+      const timeB = new Date(b.completedAt || b.initiatedAt).getTime();
+      return timeB - timeA;
+    });
+
     return (
       <View style={{ gap: 8 }}>
-        {runs.map(run => renderClassifiedRunRow(run, 'processed'))}
+        {sortedRuns.map(run => renderClassifiedRunRow(run, 'processed'))}
       </View>
     );
   };
@@ -1032,133 +1306,200 @@ export default function ScraperAutomaticScreen() {
 
   return (
     <ScrollView style={styles.container}>
-      <ThemedView style={styles.section}>
-        {renderAccordionSection(
-          'posts',
-          <ThemedText style={styles.accordionTitle}>Posts</ThemedText>,
-          <>
+      <View style={{ paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#F1F5F9', borderBottomWidth: 1, borderBottomColor: '#E2E8F0', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <ThemedText style={{ fontSize: 13, color: '#64748B' }}>Show processed from last:</ThemedText>
+        <ToggleButtonGroup
+          value={filterDays}
+          exclusive
+          onChange={(_, v) => v !== null && setFilterDays(v)}
+          size="small"
+        >
+          <ToggleButton value={1}>24h</ToggleButton>
+          <ToggleButton value={7}>7d</ToggleButton>
+          <ToggleButton value={30}>30d</ToggleButton>
+          <ToggleButton value={-1}>All</ToggleButton>
+        </ToggleButtonGroup>
+      </View>
 
-            {renderScheduleCard('posts')}
-            {/* Posts Group */}
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={styles.sectionCardTitle}>Pending Posts Runs</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {isLoadingRuns ? (
-                <ActivityIndicator size="small" />
-              ) : (
-                <View style={{ gap: 8 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' }}>
-                    <MUIButton
-                      variant="outlined"
-                      size="small"
-                      startIcon={<PlayArrowIcon />}
-                      onClick={() => triggerTypedPoll('posts')}
-                      disabled={isPollingPosts}
-                    >
-                      {isPollingPosts ? 'Polling...' : 'Poll'}
-                    </MUIButton>
-                  </View>
-                  {pendingPostsRuns.length === 0 ? (
-                    <ThemedText style={{ color: '#64748B' }}>No pending runs.</ThemedText>
-                  ) : (
-                    pendingPostsRuns.map(run => renderPendingRunCard(run, 'pending-post'))
-                  )}
-                </View>
-              )}
+      <ThemedView style={styles.section}>
+        {renderAccordionSection('posts',
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%', paddingRight: 4 }}> 
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <ThemedText style={styles.accordionTitle}>Posts</ThemedText>
+              <View style={{ width: 24 }} />
+              <ToggleButtonGroup
+                value={postsModel}
+                exclusive
+                onChange={(_, v) => v && setPostsModel(v)}
+                size="small"
+                onClick={(e) => e.stopPropagation()}
+                sx={{ height: '26px', marginRight: '12px' }}
+              >
+                <ToggleButton value="openai" sx={{ fontSize: '10px', padding: '1px 6px', height: '26px' }}>GPT</ToggleButton>
+                <ToggleButton value="gemini" sx={{ fontSize: '10px', padding: '1px 6px', height: '26px' }}>Gem</ToggleButton>
+              </ToggleButtonGroup>
             </View>
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={styles.sectionCardTitle}>Completed Posts Runs</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {isLoadingRuns ? (
+            <ChevronRightIcon fontSize="small" style={{ color: '#64748B', transform: [{ rotate: expandedSections['posts'] ? '90deg' : '0deg' }] }} />
+          </View>,
+          <>
+            {renderSubsectionCollapsible(
+              'posts-schedule',
+              'Schedule',
+              schedules.filter(s => (s.runTypes || []).includes('posts')).length,
+              renderScheduleCard('posts')
+            )}
+
+            {renderSubsectionCollapsible(
+              'posts-pending',
+              'Pending',
+              pendingPostsRuns.length,
+              <View style={{ gap: 8 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' }}>
+                  <MUIButton
+                    variant="outlined"
+                    size="small"
+                    startIcon={<PlayArrowIcon />}
+                    onClick={() => triggerTypedPoll('posts')}
+                    disabled={isPollingPosts}
+                  >
+                    {isPollingPosts ? 'Polling...' : 'Poll'}
+                  </MUIButton>
+                </View>
+                {isLoadingRuns ? (
+                  <ActivityIndicator size="small" />
+                ) : pendingPostsRuns.length === 0 ? (
+                  <ThemedText style={{ color: '#64748B' }}>No pending runs.</ThemedText>
+                ) : (
+                  pendingPostsRuns.map(run => renderPendingRunCard(run, 'pending-post'))
+                )}
+              </View>
+            )}
+
+            {renderSubsectionCollapsible(
+              'posts-completed',
+              'Ready for AI',
+              completedPostsRuns.length,
+              isLoadingRuns ? (
                 <ActivityIndicator size="small" />
               ) : completedPostsRuns.length === 0 ? (
-                <ThemedText style={{ color: '#64748B' }}>No completed posts runs.</ThemedText>
+                <ThemedText style={{ color: '#64748B' }}>No runs waiting for AI.</ThemedText>
               ) : (
                 <View style={{ gap: 8 }}>
                   {completedPostsRuns.map(run => renderCompletedRunCard(run, 'completed-post'))}
                 </View>
-              )}
-            </View>
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={styles.sectionCardTitle}>Classified Posts</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {renderClassifiedRunsSection('posts')}
-            </View>
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={styles.sectionCardTitle}>Processed Posts</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {renderProcessedRunsSection('posts')}
-            </View>
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={[styles.sectionCardTitle, { color: '#DC2626' }]}>Posts Errors</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {renderErrorLogsSection('posts')}
-            </View>
+              )
+            )}
 
+            {renderSubsectionCollapsible(
+              'posts-processed',
+              'AI Finished',
+              processedPostsRuns.length + classifiedPostsRuns.length,
+              renderProcessedRunsSection('posts')
+            )}
+
+            {renderSubsectionCollapsible(
+              'posts-errors',
+              'Errors',
+              pollingLogs.filter(log => shouldIncludeLog(log, 'posts') && (Array.isArray(log.errors) ? log.errors.length > 0 : !!log.errors)).length,
+              renderErrorLogsSection('posts')
+            )}
           </>
         )}
 
-        {renderAccordionSection(
-          'stories',
-          <ThemedText style={styles.accordionTitle}>Stories</ThemedText>,
+        {renderAccordionSection('stories',
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%', paddingRight: 4 }}> 
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <ThemedText style={styles.accordionTitle}>Stories</ThemedText>
+              <View style={{ width: 24 }} />
+              <ToggleButtonGroup
+                value={storiesModel}
+                exclusive
+                onChange={(_, v) => v && setStoriesModel(v)}
+                size="small"
+                onClick={(e) => e.stopPropagation()}
+                sx={{ height: '26px', marginRight: '12px' }}
+              >
+                <ToggleButton value="openai" sx={{ fontSize: '10px', padding: '1px 6px', height: '26px' }}>GPT</ToggleButton>
+                <ToggleButton value="gemini" sx={{ fontSize: '10px', padding: '1px 6px', height: '26px' }}>Gem</ToggleButton>
+              </ToggleButtonGroup>
+            </View>
+            <ChevronRightIcon fontSize="small" style={{ color: '#64748B', transform: [{ rotate: expandedSections['stories'] ? '90deg' : '0deg' }] }} />
+          </View>,
           <>
-            {renderScheduleCard('stories')}
-            {/* Stories Group */}
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={styles.sectionCardTitle}>Pending Stories Runs</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {isLoadingRuns ? (
+            {renderSubsectionCollapsible(
+              'stories-schedule',
+              'Schedule',
+              schedules.filter(s => (s.runTypes || []).includes('stories')).length,
+              renderScheduleCard('stories')
+            )}
+
+            {renderSubsectionCollapsible(
+              'stories-pending',
+              'Pending',
+              pendingStoriesRuns.length,
+              <View style={{ gap: 8 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' }}>
+                  <MUIButton
+                    variant="outlined"
+                    size="small"
+                    startIcon={<PlayArrowIcon />}
+                    onClick={() => triggerTypedPoll('stories')}
+                    disabled={isPollingStories}
+                  >
+                    {isPollingStories ? 'Polling...' : 'Poll'}
+                  </MUIButton>
+                </View>
+                {isLoadingRuns ? (
+                  <ActivityIndicator size="small" />
+                ) : pendingStoriesRuns.length === 0 ? (
+                  <ThemedText style={{ color: '#64748B' }}>No pending runs.</ThemedText>
+                ) : (
+                  pendingStoriesRuns.map(run => renderPendingRunCard(run, 'pending-story'))
+                )}
+              </View>
+            )}
+
+            {renderSubsectionCollapsible(
+              'stories-completed',
+              'Ready for AI',
+              completedStoriesRuns.length,
+              isLoadingRuns ? (
                 <ActivityIndicator size="small" />
+              ) : completedStoriesRuns.length === 0 ? (
+                <ThemedText style={{ color: '#64748B' }}>No runs waiting for AI.</ThemedText>
               ) : (
                 <View style={{ gap: 8 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
                     <MUIButton
                       variant="outlined"
                       size="small"
-                      startIcon={<PlayArrowIcon />}
-                      onClick={() => triggerTypedPoll('stories')}
-                      disabled={isPollingStories}
+                      onClick={async () => {
+                        for (const run of completedStoriesRuns) {
+                          await handleManualClassifyRun(run.runId);
+                        }
+                      }}
                     >
-                      {isPollingStories ? 'Polling...' : 'Poll'}
+                      Classify All Stories
                     </MUIButton>
                   </View>
-                  {pendingStoriesRuns.length === 0 ? (
-                    <ThemedText style={{ color: '#64748B' }}>No pending runs.</ThemedText>
-                  ) : (
-                    pendingStoriesRuns.map(run => renderPendingRunCard(run, 'pending-story'))
-                  )}
-                </View>
-              )}
-            </View>
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={styles.sectionCardTitle}>Completed Stories Runs</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {isLoadingRuns ? (
-                <ActivityIndicator size="small" />
-              ) : completedStoriesRuns.length === 0 ? (
-                <ThemedText style={{ color: '#64748B' }}>No completed stories runs.</ThemedText>
-              ) : (
-                <View style={{ gap: 8 }}>
                   {completedStoriesRuns.map(run => renderCompletedRunCard(run, 'completed-story'))}
                 </View>
-              )}
-            </View>
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={styles.sectionCardTitle}>Classified Stories</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {renderClassifiedRunsSection('stories')}
-            </View>
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={styles.sectionCardTitle}>Processed Stories</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {renderProcessedRunsSection('stories')}
-            </View>
-            <View style={styles.sectionCard}>
-              <ThemedText type="subtitle" style={[styles.sectionCardTitle, { color: '#DC2626' }]}>Stories Errors</ThemedText>
-              <Box sx={{ my: 1 }}><Divider /></Box>
-              {renderErrorLogsSection('stories')}
-            </View>
+              )
+            )}
 
+            {renderSubsectionCollapsible(
+              'stories-processed',
+              'AI Finished',
+              processedStoriesRuns.length + classifiedStoriesRuns.length,
+              renderProcessedRunsSection('stories')
+            )}
+
+            {renderSubsectionCollapsible(
+              'stories-errors',
+              'Errors',
+              pollingLogs.filter(log => shouldIncludeLog(log, 'stories') && (Array.isArray(log.errors) ? log.errors.length > 0 : !!log.errors)).length,
+              renderErrorLogsSection('stories')
+            )}
           </>
         )}
 
@@ -1260,10 +1601,26 @@ export default function ScraperAutomaticScreen() {
           onRequestClose={() => setIsReviewModalVisible(false)}
         >
           <View style={styles.modalContainer}>
-            <View style={styles.modalView}>
+            <View style={[styles.modalView, { flexDirection: 'column', maxHeight: '95%' }]}>
+              {/* Fixed Header with Close Button */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, borderBottomWidth: 1, borderBottomColor: '#E5E7EB', paddingBottom: 12 }}>
+                <ThemedText style={styles.modalTitle}>
+                  Review {reviewCategory === 'events' ? 'Pending Events' : (reviewCategory === 'processed' ? 'Processed Events' : 'Non-Events')}
+                </ThemedText>
+                <MUIButton
+                  variant="text"
+                  size="small"
+                  onClick={() => setIsReviewModalVisible(false)}
+                  sx={{ minWidth: '32px', width: '32px', height: '32px', padding: '0px' }}
+                >
+                  ✕
+                </MUIButton>
+              </View>
+
+              {/* Single Unified Scroll */}
               {reviewList && reviewList.length > 0 && (
-                <ScrollView>
-                  <ThemedText style={styles.modalTitle}>Review</ThemedText>
+                <ScrollView style={{ flex: 1, marginBottom: 12 }}>
+                  {/* Image */}
                   {(() => {
                     const current = reviewList[reviewIndex] || {};
                     const rawUrl = current.imageUrl || pickImageUrl(current) || null;
@@ -1274,222 +1631,275 @@ export default function ScraperAutomaticScreen() {
                       <Image source={{ uri: proxied }} style={[styles.reviewImage, { height: desiredHeight }]} resizeMode="contain" />
                     );
                   })()}
+
+                  {/* Caption */}
                   {(() => {
                     const current = reviewList[reviewIndex] || {}; return current.caption ? (
-                      <ThemedText style={{ marginTop: 8 }}>{current.caption}</ThemedText>
+                      <View style={{ marginBottom: 12 }}>
+                        <ThemedText style={{ fontWeight: 'bold', fontSize: 12, color: '#64748B', marginBottom: 4 }}>Caption</ThemedText>
+                        <ThemedText style={{ marginTop: 0 }}>{current.caption}</ThemedText>
+                      </View>
                     ) : null;
                   })()}
-                  {/* Reasons moved to fixed section below the scroll */}
-                </ScrollView>
-              )}
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
-                <IconButton size="small" onClick={() => setReviewIndex(i => Math.max(0, i - 1))} disabled={reviewIndex === 0}>
-                  <ChevronLeftIcon fontSize="small" />
-                </IconButton>
-                <ThemedText>{reviewList.length > 0 ? `${reviewIndex + 1} / ${reviewList.length}` : ''}</ThemedText>
-                <IconButton size="small" onClick={() => setReviewIndex(i => Math.min(reviewList.length - 1, i + 1))} disabled={reviewIndex >= reviewList.length - 1}>
-                  <ChevronRightIcon fontSize="small" />
-                </IconButton>
-              </View>
-              {(() => {
-                const current = reviewList[reviewIndex] || {};
-                return (
-                  <View style={{ marginTop: 12 }}>
-                    {Array.isArray(current.reasons) && current.reasons.length > 0 && (
-                      <View style={{ marginBottom: 8 }}>
-                        <ThemedText style={{ fontWeight: 'bold' }}>Reasons</ThemedText>
+
+                  {/* Reasons */}
+                  {(() => {
+                    const current = reviewList[reviewIndex] || {};
+                    return Array.isArray(current.reasons) && current.reasons.length > 0 ? (
+                      <View style={{ marginBottom: 12 }}>
+                        <ThemedText style={{ fontWeight: 'bold', fontSize: 12, color: '#64748B', marginBottom: 4 }}>Reasons</ThemedText>
                         <ThemedText style={{ color: '#64748B' }}>{current.reasons.join(', ')}</ThemedText>
                       </View>
-                    )}
-                    {current.model && (
-                      <View style={{ marginBottom: 8 }}>
-                        <ThemedText style={{ fontWeight: 'bold' }}>Model</ThemedText>
-                        <ThemedText style={{ color: '#64748B' }}>{JSON.stringify(current.model)}</ThemedText>
+                    ) : null;
+                  })()}
+
+                  {/* Model */}
+                  {(() => {
+                    const current = reviewList[reviewIndex] || {};
+                    return current.model ? (
+                      <View style={{ marginBottom: 12 }}>
+                        <ThemedText style={{ fontWeight: 'bold', fontSize: 12, color: '#64748B', marginBottom: 4 }}>Model</ThemedText>
+                        <ThemedText style={{ color: '#64748B', fontSize: 11 }}>{JSON.stringify(current.model)}</ThemedText>
                       </View>
-                    )}
-                    {current.signals && (
-                      <View style={{ marginBottom: 8 }}>
-                        <ThemedText style={{ fontWeight: 'bold' }}>Signals</ThemedText>
-                        <ThemedText style={{ color: '#64748B' }}>{JSON.stringify(current.signals)}</ThemedText>
+                    ) : null;
+                  })()}
+
+                  {/* Signals */}
+                  {(() => {
+                    const current = reviewList[reviewIndex] || {};
+                    return current.signals ? (
+                      <View style={{ marginBottom: 12 }}>
+                        <ThemedText style={{ fontWeight: 'bold', fontSize: 12, color: '#64748B', marginBottom: 4 }}>Signals</ThemedText>
+                        <ThemedText style={{ color: '#64748B', fontSize: 11 }}>{JSON.stringify(current.signals)}</ThemedText>
                       </View>
-                    )}
-                    {current.signals && (current.signals.dateFound === true || current.signals.venueFound === true) && (
-                      <View style={{ marginBottom: 8 }}>
+                    ) : null;
+                  })()}
+
+                  {/* Detected Date & Venue */}
+                  {(() => {
+                    const current = reviewList[reviewIndex] || {};
+                    return current.signals && (current.signals.dateFound === true || current.signals.venueFound === true) ? (
+                      <View style={{ marginBottom: 12 }}>
+                        <ThemedText style={{ fontWeight: 'bold', fontSize: 12, color: '#64748B', marginBottom: 4 }}>Detected Information</ThemedText>
                         {current.signals.dateFound === true && (() => {
                           const s = current.signals || {};
                           const dateDetail = s.dateISONormalized || s.dateISO || s.date || s.dateText || s.dateString || null;
                           return (
-                            <View style={{ marginBottom: 4 }}>
-                              <ThemedText style={{ fontWeight: 'bold' }}>Date</ThemedText>
-                              <ThemedText style={{ color: '#64748B' }}>
-                                {typeof dateDetail === 'string' ? dateDetail : (dateDetail ? JSON.stringify(dateDetail) : 'Detected')}
-                              </ThemedText>
+                            <View style={{ marginBottom: 6 }}>
+                              <ThemedText style={{ fontSize: 11, color: '#475569' }}>📅 <ThemedText style={{ fontWeight: 'bold' }}>Date:</ThemedText> {typeof dateDetail === 'string' ? dateDetail : (dateDetail ? JSON.stringify(dateDetail) : 'Detected')}</ThemedText>
                             </View>
                           );
                         })()}
                         {current.signals.venueFound === true && (() => {
                           const s = current.signals || {};
-                          const venueDetail = s.matchedVenueName || s.matchedVenue?.name || s.venueName || s.venue?.name || s.venue || s.venueObject || null;
+                          const venueDetail = current.detectedVenueName || s.matchedVenueName || s.matchedVenue?.name || s.venueName || s.venue?.name || s.venue || s.venueObject || null;
+                          const hasError = !!current.error && current.error.includes('Venue not found');
                           return (
-                            <View style={{ marginBottom: 4 }}>
-                              <ThemedText style={{ fontWeight: 'bold' }}>Venue</ThemedText>
-                              <ThemedText style={{ color: '#64748B' }}>
-                                {typeof venueDetail === 'string' ? venueDetail : (venueDetail ? JSON.stringify(venueDetail) : 'Detected')}
-                              </ThemedText>
+                            <View style={{ marginBottom: 0 }}>
+                              <ThemedText style={{ fontSize: 11, color: '#475569' }}>📍 <ThemedText style={{ fontWeight: 'bold' }}>Venue:</ThemedText> {typeof venueDetail === 'string' ? venueDetail : (venueDetail ? JSON.stringify(venueDetail) : 'Detected')}</ThemedText>
+                              {hasError && (
+                                <MUIButton 
+                                  variant="outlined" 
+                                  size="small" 
+                                  onClick={() => { 
+                                    let query = typeof venueDetail === 'string' ? venueDetail : '';
+                                    if (!query && current.error?.includes('Venue not found')) {
+                                      const match = current.error.match(/"([^"]+)"/);
+                                      if (match) query = match[1];
+                                    }
+                                    setVenueSearchQuery(query); 
+                                    setIsVenuePickerVisible(true); 
+                                  }}
+                                  sx={{ mt: 1, textTransform: 'none', fontSize: '10px', py: 0 }}
+                                >
+                                  Link to Existing Venue
+                                </MUIButton>
+                              )}
                             </View>
                           );
                         })()}
                       </View>
-                    )}
-                    <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-                      {typeof current.confidence === 'number' && (
-                        <ThemedText><ThemedText style={{ fontWeight: 'bold' }}>Confidence:</ThemedText> {current.confidence.toFixed(2)}</ThemedText>
-                      )}
-                      {current.error && (
-                        <>
-                          <ThemedText style={{ color: '#DC2626' }}><ThemedText style={{ fontWeight: 'bold' }}>Error:</ThemedText> {current.error}</ThemedText>
-                          <MUIButton
-                            variant="outlined"
-                            size="small"
-                            color="error"
-                            onClick={async () => {
-                              if (!reviewRunId) return;
-                              const itemId = current.itemId || current.id;
-                              if (!itemId) return;
-                              try {
-                                setRetryingItemId(itemId);
-                                const resp = await fetch(RETRY_ITEM_URL, {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({ runId: reviewRunId, itemId })
+                    ) : null;
+                  })()}
+
+                  {/* Confidence & Status */}
+                  {(() => {
+                    const current = reviewList[reviewIndex] || {};
+                    return (
+                      <View style={{ marginBottom: 12 }}>
+                        <ThemedText style={{ fontWeight: 'bold', fontSize: 12, color: '#64748B', marginBottom: 4 }}>Status</ThemedText>
+                        {typeof current.confidence === 'number' && (
+                          <ThemedText style={{ color: '#64748B', marginBottom: 6 }}>✓ <ThemedText style={{ fontWeight: 'bold' }}>Confidence:</ThemedText> {(current.confidence * 100).toFixed(0)}%</ThemedText>
+                        )}
+                        {current.error && (
+                          <ThemedText style={{ color: '#DC2626', marginBottom: 6 }}>✗ <ThemedText style={{ fontWeight: 'bold' }}>Error:</ThemedText> {current.error}</ThemedText>
+                        )}
+                        {!current.error && !current.eventId && (
+                          <ThemedText style={{ color: '#F59E0B' }}>⏳ Pending processing</ThemedText>
+                        )}
+                        {current.eventId && (
+                          <ThemedText style={{ color: '#10B981' }}>✓ <ThemedText style={{ fontWeight: 'bold' }}>Processed</ThemedText> (Event ID: {current.eventId})</ThemedText>
+                        )}
+                      </View>
+                    );
+                  })()}
+
+                  {/* Raw Apify Item */}
+                  {(() => {
+                    const runId = reviewRunId || '';
+                    const itemKey = (reviewList[reviewIndex] || {}).itemId || (reviewList[reviewIndex] || {}).id;
+                    const raw = (runId && itemKey && apifyRawByRun[runId]?.itemsById) ? apifyRawByRun[runId].itemsById[String(itemKey)] : null;
+                    return raw ? (
+                      <View style={{ marginBottom: 12 }}>
+                        <ThemedText style={{ fontWeight: 'bold', fontSize: 12, color: '#64748B', marginBottom: 4 }}>Raw Item (Apify)</ThemedText>
+                        <ScrollView style={{ maxHeight: 200, padding: 8, backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 4 }}>
+                          <ThemedText style={{ color: '#0F172A', fontSize: 10, ...(Platform.OS === 'web' ? { fontFamily: 'monospace', whiteSpace: 'pre-wrap' } as any : {}) }}>
+                            {JSON.stringify(raw, null, 2)}
+                          </ThemedText>
+                        </ScrollView>
+                      </View>
+                    ) : null;
+                  })()}
+
+                  {/* Classification Output */}
+                  {(() => {
+                    const current = reviewList[reviewIndex] || {};
+                    return (
+                      <View style={{ marginBottom: 12 }}>
+                        <ThemedText style={{ fontWeight: 'bold', fontSize: 12, color: '#64748B', marginBottom: 4 }}>Full Classification Data</ThemedText>
+                        <ScrollView style={{ maxHeight: 200, padding: 8, backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 4 }}>
+                          <ThemedText style={{ color: '#0F172A', fontSize: 10, ...(Platform.OS === 'web' ? { fontFamily: 'monospace', whiteSpace: 'pre-wrap' } as any : {}) }}>
+                            {JSON.stringify(current, null, 2)}
+                          </ThemedText>
+                        </ScrollView>
+                      </View>
+                    );
+                  })()}
+                </ScrollView>
+              )}
+
+              {/* Fixed Bottom Navigation & Actions */}
+              <View style={{ borderTopWidth: 1, borderTopColor: '#E5E7EB', paddingTop: 12 }}>
+                {/* Navigation */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <IconButton size="small" onClick={() => setReviewIndex(i => Math.max(0, i - 1))} disabled={reviewIndex === 0}>
+                    <ChevronLeftIcon fontSize="small" />
+                  </IconButton>
+                  <ThemedText style={{ fontSize: 12, color: '#64748B' }}>{reviewList.length > 0 ? `Item ${reviewIndex + 1} of ${reviewList.length}` : ''}</ThemedText>
+                  <IconButton size="small" onClick={() => setReviewIndex(i => Math.min(reviewList.length - 1, i + 1))} disabled={reviewIndex >= reviewList.length - 1}>
+                    <ChevronRightIcon fontSize="small" />
+                  </IconButton>
+                </View>
+                {/* Action Buttons */}
+                <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                  {(() => {
+                    const current = reviewList[reviewIndex] || {};
+                    if (current.error) {
+                      return (
+                        <MUIButton
+                          variant="contained"
+                          size="small"
+                          onClick={async () => {
+                            if (!reviewRunId) return;
+                            const itemId = current.itemId || current.id;
+                            if (!itemId) return;
+                            try {
+                              setRetryingItemId(itemId);
+                              const resp = await fetch(RETRY_ITEM_URL, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ runId: reviewRunId, itemId, model: extractionModel })
+                              });
+                              const data = await resp.json();
+                              if (!resp.ok) throw new Error(data.error || 'Retry failed');
+                              const updated = data.updated || {};
+                              setReviewList(prev => {
+                                const copy = [...prev];
+                                const idx = reviewIndex;
+                                copy[idx] = { ...copy[idx], ...updated, error: null };
+                                return copy;
+                              });
+                              if (reviewRunId && runReviews[reviewRunId]) {
+                                setRunReviews(prev => {
+                                  const cur = prev[reviewRunId];
+                                  const listKey = reviewCategory === 'events' ? 'events' : 'nonEvents';
+                                  const isEventNow = !!updated.isEvent;
+                                  const updatedItem = { ...(runReviews[reviewRunId] as any)[listKey]?.[reviewIndex], ...updated };
+                                  const next = { ...prev } as any;
+                                  next[reviewRunId] = {
+                                    ...cur,
+                                    events: (cur.events || []).filter((it: any) => (it.itemId || it.id) !== (itemId)).concat(isEventNow ? [updatedItem] : []),
+                                    nonEvents: (cur.nonEvents || []).filter((it: any) => (it.itemId || it.id) !== (itemId)).concat(!isEventNow ? [updatedItem] : []),
+                                  };
+                                  return next;
                                 });
-                                const data = await resp.json();
-                                if (!resp.ok) throw new Error(data.error || 'Retry failed');
-                                const updated = data.updated || {};
-                                // Update local reviewList and runReviews
-                                setReviewList(prev => {
-                                  const copy = [...prev];
-                                  const idx = reviewIndex;
-                                  copy[idx] = { ...copy[idx], ...updated, error: null };
-                                  return copy;
-                                });
-                                if (reviewRunId && runReviews[reviewRunId]) {
-                                  setRunReviews(prev => {
-                                    const cur = prev[reviewRunId];
-                                    const listKey = reviewCategory === 'events' ? 'events' : 'nonEvents';
-                                    const otherKey = reviewCategory === 'events' ? 'nonEvents' : 'events';
-                                    // Decide where the item belongs after update
-                                    const isEventNow = !!updated.isEvent;
-                                    const updatedItem = { ...(runReviews[reviewRunId] as any)[listKey]?.[reviewIndex], ...updated };
-                                    const next = { ...prev } as any;
-                                    // Remove from both lists then add to correct list to avoid duplicates
-                                    next[reviewRunId] = {
-                                      ...cur,
-                                      events: (cur.events || []).filter((it: any) => (it.itemId || it.id) !== (itemId)).concat(isEventNow ? [updatedItem] : []),
-                                      nonEvents: (cur.nonEvents || []).filter((it: any) => (it.itemId || it.id) !== (itemId)).concat(!isEventNow ? [updatedItem] : []),
-                                    };
-                                    return next;
-                                  });
-                                }
-                                // If the category changed, switch the view list
-                                if ((updated.isEvent && reviewCategory === 'nonEvents') || (!updated.isEvent && reviewCategory === 'events')) {
-                                  const r = runReviews[reviewRunId];
-                                  const newList = updated.isEvent ? r?.events || [] : r?.nonEvents || [];
-                                  setReviewList(newList);
-                                  setReviewCategory(updated.isEvent ? 'events' : 'nonEvents');
-                                  setReviewIndex(Math.max(0, newList.findIndex((x: any) => (x.itemId || x.id) === (itemId))));
-                                }
-                                Alert.alert('Success', 'Classification retried.');
-                              } catch (e: any) {
-                                Alert.alert('Error', e.message || 'Failed to retry classification');
-                              } finally {
-                                setRetryingItemId(null);
                               }
-                            }}
-                            disabled={retryingItemId === (current.itemId || current.id)}
-                            style={{ marginLeft: 8 }}
-                          >
-                            {retryingItemId === (current.itemId || current.id) ? 'Retrying…' : 'Retry classification'}
-                          </MUIButton>
-                        </>
-                      )}
-                      <MUIButton
-                        variant="outlined"
-                        size="small"
-                        color="error"
-                        onClick={async () => {
-                          if (!reviewRunId) return;
-                          const itemId = current.itemId || current.id;
-                          if (!itemId) return;
-                          const confirm = Platform.OS === 'web' ? window.confirm('Delete this classification entry?') : true;
-                          if (!confirm) return;
-                          try {
-                            const resp = await fetch(DELETE_CLASS_ITEM_URL, {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ runId: reviewRunId, itemId })
-                            });
-                            const data = await resp.json();
-                            if (!resp.ok || !data.success) throw new Error(data.error || 'Delete failed');
-                            // Update local lists
-                            setReviewList(prev => prev.filter((x: any, idx: number) => idx !== reviewIndex));
-                            setRunReviews(prev => {
-                              const cur = prev[reviewRunId!];
-                              if (!cur) return prev;
-                              const listKey = reviewCategory === 'events' ? 'events' : 'nonEvents';
-                              const otherKey = reviewCategory === 'events' ? 'nonEvents' : 'events';
-                              const targetId = itemId;
-                              const next = { ...prev } as any;
-                              next[reviewRunId!] = {
-                                ...cur,
-                                events: (cur.events || []).filter((it: any) => (it.itemId || it.id) !== targetId),
-                                nonEvents: (cur.nonEvents || []).filter((it: any) => (it.itemId || it.id) !== targetId),
-                              };
-                              return next;
-                            });
-                            // Adjust index if needed
-                            setReviewIndex(i => Math.max(0, Math.min(i, (reviewList.length - 2))));
-                            Alert.alert('Deleted', 'Classification entry deleted.');
-                          } catch (e: any) {
-                            Alert.alert('Error', e.message || 'Failed to delete entry');
-                          }
-                        }}
-                      >
-                        Delete item
-                      </MUIButton>
-                    </View>
-                    <View style={{ marginTop: 12 }}>
-                      <ThemedText style={{ fontWeight: 'bold' }}>Raw item (Apify)</ThemedText>
-                      {(() => {
-                        const runId = reviewRunId || '';
-                        const itemKey = current.itemId || current.id;
-                        const raw = (runId && itemKey && apifyRawByRun[runId]?.itemsById) ? apifyRawByRun[runId].itemsById[String(itemKey)] : null;
-                        if (!raw && apifyRawByRun[runId]?.loading) {
-                          return <ActivityIndicator size="small" />;
-                        }
-                        return (
-                          <ScrollView style={{ maxHeight: 240, marginTop: 6, padding: 8, backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 4 }}>
-                            <ThemedText style={{ color: '#0F172A', fontSize: 12, ...(Platform.OS === 'web' ? { fontFamily: 'monospace', whiteSpace: 'pre-wrap' } as any : {}) }}>
-                              {raw ? JSON.stringify(raw, null, 2) : 'Raw item not found.'}
-                            </ThemedText>
-                          </ScrollView>
-                        );
-                      })()}
-                    </View>
-                    <View style={{ marginTop: 12 }}>
-                      <ThemedText style={{ fontWeight: 'bold' }}>Classification output</ThemedText>
-                      <ScrollView style={{ maxHeight: 240, marginTop: 6, padding: 8, backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 4 }}>
-                        <ThemedText style={{ color: '#0F172A', fontSize: 12, ...(Platform.OS === 'web' ? { fontFamily: 'monospace', whiteSpace: 'pre-wrap' } as any : {}) }}>
-                          {JSON.stringify(current, null, 2)}
-                        </ThemedText>
-                      </ScrollView>
-                    </View>
-                  </View>
-                );
-              })()}
-              <MUIButton variant="outlined" size="small" onClick={() => setIsReviewModalVisible(false)} style={{ marginTop: 16 }}>
-                Close
-              </MUIButton>
+                              if ((updated.isEvent && reviewCategory === 'nonEvents') || (!updated.isEvent && reviewCategory === 'events')) {
+                                const r = runReviews[reviewRunId];
+                                const newList = updated.isEvent ? r?.events || [] : r?.nonEvents || [];
+                                setReviewList(newList);
+                                setReviewCategory(updated.isEvent ? 'events' : 'nonEvents');
+                                setReviewIndex(Math.max(0, newList.findIndex((x: any) => (x.itemId || x.id) === (itemId))));
+                              }
+                              Alert.alert('Success', 'Classification retried.');
+                            } catch (e: any) {
+                              Alert.alert('Error', e.message || 'Failed to retry classification');
+                            } finally {
+                              setRetryingItemId(null);
+                            }
+                          }}
+                          disabled={retryingItemId === (current.itemId || current.id)}
+                        >
+                          {retryingItemId === (current.itemId || current.id) ? 'Retrying…' : '🔄 Retry'}
+                        </MUIButton>
+                      );
+                    }
+                    return null;
+                  })()}
+                  <MUIButton
+                    variant="outlined"
+                    size="small"
+                    color="error"
+                    onClick={async () => {
+                      if (!reviewRunId) return;
+                      const current = reviewList[reviewIndex] || {};
+                      const itemId = current.itemId || current.id;
+                      if (!itemId) return;
+                      const confirm = (Platform.OS === 'web' && typeof window !== 'undefined') ? window.confirm('Delete this classification entry?') : true;
+                      if (!confirm) return;
+                      try {
+                        const resp = await fetch(DELETE_CLASS_ITEM_URL, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ runId: reviewRunId, itemId })
+                        });
+                        const data = await resp.json();
+                        if (!resp.ok || !data.success) throw new Error(data.error || 'Delete failed');
+                        setReviewList(prev => prev.filter((x: any, idx: number) => idx !== reviewIndex));
+                        setRunReviews(prev => {
+                          const cur = prev[reviewRunId!];
+                          if (!cur) return prev;
+                          const listKey = reviewCategory === 'events' ? 'events' : 'nonEvents';
+                          const targetId = itemId;
+                          const next = { ...prev } as any;
+                          next[reviewRunId!] = {
+                            ...cur,
+                            events: (cur.events || []).filter((it: any) => (it.itemId || it.id) !== targetId),
+                            nonEvents: (cur.nonEvents || []).filter((it: any) => (it.itemId || it.id) !== targetId),
+                          };
+                          return next;
+                        });
+                        setReviewIndex(i => Math.max(0, Math.min(i, (reviewList.length - 2))));
+                        Alert.alert('Deleted', 'Classification entry deleted.');
+                      } catch (e: any) {
+                        Alert.alert('Error', e.message || 'Failed to delete entry');
+                      }
+                    }}
+                  >
+                    🗑️ Delete
+                  </MUIButton>
+                </View>
+              </View>
             </View>
           </View>
         </Modal>
@@ -1535,6 +1945,74 @@ export default function ScraperAutomaticScreen() {
                   Delete
                 </MUIButton>
               </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Venue Picker Modal */}
+        <Modal
+          animationType="slide"
+          transparent={true}
+          visible={isVenuePickerVisible}
+          onRequestClose={() => setIsVenuePickerVisible(false)}
+        >
+          <View style={styles.modalContainer}>
+            <View style={[styles.modalView, { maxHeight: '90%' }]}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <ThemedText style={styles.modalTitle}>Link to Venue</ThemedText>
+                <TouchableOpacity onPress={() => setIsVenuePickerVisible(false)}>
+                  <ThemedText style={{ color: '#007AFF' }}>Close</ThemedText>
+                </TouchableOpacity>
+              </View>
+
+              <TextInput
+                style={{
+                  borderWidth: 1,
+                  borderColor: '#ddd',
+                  borderRadius: 6,
+                  padding: 10,
+                  marginBottom: 16,
+                  fontSize: 16
+                }}
+                placeholder="Search venues..."
+                value={venueSearchQuery}
+                onChangeText={setVenueSearchQuery}
+              />
+
+              {isMatchingVenue ? (
+                <View style={{ padding: 20, alignItems: 'center' }}>
+                  <ActivityIndicator size="large" />
+                  <ThemedText style={{ marginTop: 10 }}>Updating and processing...</ThemedText>
+                </View>
+              ) : (
+                <FlatList
+                  data={filteredVenues}
+                  keyExtractor={item => item.id}
+                  renderItem={({ item }) => (
+                    <TouchableOpacity 
+                      onPress={() => handleManualVenueLink(item)}
+                      style={{
+                        paddingVertical: 12,
+                        paddingHorizontal: 8,
+                        borderBottomWidth: 1,
+                        borderBottomColor: '#f0f0f0'
+                      }}
+                    >
+                      <ThemedText style={{ fontWeight: 'bold' }}>{item.name}</ThemedText>
+                      <ThemedText style={{ fontSize: 12, color: '#666' }} numberOfLines={1}>
+                        {item.address}
+                      </ThemedText>
+                      {item.nameVariations?.length > 0 && (
+                        <ThemedText style={{ fontSize: 10, color: '#999', fontStyle: 'italic' }}>
+                          Aliases: {item.nameVariations.join(', ')}
+                        </ThemedText>
+                      )}
+                    </TouchableOpacity>
+                  )}
+                  style={{ maxHeight: 400 }}
+                  ListEmptyComponent={<ThemedText style={{ textAlign: 'center', padding: 20, color: '#999' }}>No venues found</ThemedText>}
+                />
+              )}
             </View>
           </View>
         </Modal>
@@ -1713,5 +2191,59 @@ const styles = StyleSheet.create({
   tag: {
     backgroundColor: '#E2E8F0',
     color: '#2D3748',
+  },
+  classifiedButtonsContainer: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 10,
+    alignItems: 'center',
+  },
+  classifiedButtonsContainerMobile: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  subsectionWrapper: {
+    marginBottom: 12,
+  },
+  subsectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    borderRadius: 6,
+  },
+  subsectionHeaderContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  subsectionTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  countBadge: {
+    backgroundColor: '#EF4444',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+    minWidth: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  countBadgeText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  subsectionContent: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#FAFAFA',
+    gap: 8,
   },
 });
